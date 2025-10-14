@@ -4,6 +4,7 @@ set(T event_system)
 
 project(${T})
 
+set(CMAKE_C_STANDARD 11)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_library(${T} STATIC ${CMAKE_CURRENT_SOURCE_DIR}/src/event_system.c)

@@ -4,3 +4,4 @@ set(T main)
 
 add_executable(${T} main.c)
 target_link_libraries(${T} event_system)
+target_compile_options(${T} PRIVATE -Wall -Wextra -Wpedantic)
