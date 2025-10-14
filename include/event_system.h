@@ -7,6 +7,11 @@
 #include <stdbool.h>
 #include <assert.h>
 
+#ifdef __cplusplus
+extern "C" {
+
+#endif
+
 #define ES_EV_EXPECT(ev, T)  do {                                   \
     assert((ev) != NULL);                                           \
     assert((ev)->data != NULL);                                     \
@@ -56,3 +61,7 @@ void es_unsubscribe_all(es_event_bus_t *bus, es_event_type_e type);
 
 bool es_publish_ev(es_event_bus_t *bus, const es_event_t *event);
 bool es_publish(es_event_bus_t *bus, es_event_type_e type);
+
+#ifdef   __cplusplus
+}
+#endif

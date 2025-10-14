@@ -1,1 +1,1 @@
-# simple C11 event bus
+# simple single thread C11 event bus

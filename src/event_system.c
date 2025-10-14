@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define EB_VALID_TYPE(t) ((unsigned)(t) < (unsigned)EV_TYPE__COUNT)
+#define EB_VALID_TYPE(t) ((size_t)(t) < (size_t)EV_TYPE__COUNT)
 
 es_event_bus_t *es_create(void) {
     es_event_bus_t *bus = malloc(sizeof(es_event_bus_t));
@@ -11,9 +11,9 @@ es_event_bus_t *es_create(void) {
         return NULL;
     }
 
-    for (unsigned int t = 0; t < EV_TYPE__COUNT; ++t) {
+    for (size_t t = 0; t < EV_TYPE__COUNT; ++t) {
         bus->num_handlers_by_event[t] = 0;
-        for (unsigned int i = 0; i < ES_MAX_HANDLERS_PER_TYPE; ++i) {
+        for (size_t i = 0; i < ES_MAX_HANDLERS_PER_TYPE; ++i) {
             bus->handlers[t][i].handler = NULL;
             bus->handlers[t][i].ctx = NULL;
         }
@@ -22,8 +22,6 @@ es_event_bus_t *es_create(void) {
     return bus;
 }
 void es_destroy(es_event_bus_t *bus) {
-    assert(bus);
-
     free(bus);
 }
 
@@ -36,7 +34,7 @@ bool es_subscribe(es_event_bus_t *bus, es_event_type_e type, es_event_handler_f 
     }
 
     // forbid duplicates
-    for (unsigned int i = 0; i < bus->num_handlers_by_event[type]; ++i) {
+    for (size_t i = 0; i < bus->num_handlers_by_event[type]; ++i) {
         if (bus->handlers[type][i].handler == handler && bus->handlers[type][i].ctx == ctx) {
             return true;
         }
@@ -61,12 +59,13 @@ bool es_unsubscribe(es_event_bus_t *bus, es_event_type_e type, es_event_handler_
         return false;
     }
 
-    const unsigned int n = bus->num_handlers_by_event[type];
-    for (unsigned int i = 0; i < n; ++i) {
-        if (bus->handlers[type][i].handler == handler && bus->handlers[type][i].ctx == ctx) {
-            memmove(&bus->handlers[type][i], &bus->handlers[type][i + 1], (n - i - 1) * sizeof(bus->handlers[type][0]));
-            bus->handlers[type][n - 1].handler = NULL;
-            bus->handlers[type][n - 1].ctx = NULL;
+    const size_t n = bus->num_handlers_by_event[type];
+    es_event_handler_with_ctx_t *arr = bus->handlers[type];
+    for (size_t i = 0; i < n; ++i) {
+        if (arr[i].handler == handler && arr[i].ctx == ctx) {
+            memmove(&arr[i], &arr[i + 1], (n - i - 1) * sizeof(arr[0]));
+            arr[n - 1].handler = NULL;
+            arr[n - 1].ctx = NULL;
             bus->num_handlers_by_event[type] = n - 1;
             return true;
         }
@@ -82,8 +81,8 @@ void es_unsubscribe_all(es_event_bus_t *bus, es_event_type_e type) {
         return;
     }
 
-    const unsigned int n = bus->num_handlers_by_event[type];
-    for (unsigned int i = 0; i < n; ++i) {
+    const size_t n = bus->num_handlers_by_event[type];
+    for (size_t i = 0; i < n; ++i) {
         bus->handlers[type][i].handler = NULL;
         bus->handlers[type][i].ctx = NULL;
     }
@@ -98,7 +97,8 @@ bool es_publish_ev(es_event_bus_t *bus, const es_event_t *event) {
         return false;
     }
 
-    const unsigned int n = bus->num_handlers_by_event[event->type];
+    const size_t n = bus->num_handlers_by_event[event->type];
+    assert(n <= ES_MAX_HANDLERS_PER_TYPE);
     if (n == 0) {
         return true;
     }
@@ -106,7 +106,7 @@ bool es_publish_ev(es_event_bus_t *bus, const es_event_t *event) {
     es_event_handler_with_ctx_t snap[ES_MAX_HANDLERS_PER_TYPE];
     memcpy(snap, bus->handlers[event->type], n * sizeof(es_event_handler_with_ctx_t));
 
-    for (unsigned int i = 0; i < n; ++i) {
+    for (size_t i = 0; i < n; ++i) {
         if (snap[i].handler) {
             snap[i].handler(event, bus, snap[i].ctx);
         }
