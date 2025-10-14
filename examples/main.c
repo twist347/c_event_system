@@ -1,6 +1,7 @@
 #include "event_system.h"
 
 #include <stdio.h>
+#include <assert.h>
 
 #define UNUSED(x) (void)(x)
 

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-set(T event_system)
+set(T c_event_system)
 
 project(${T})
 
