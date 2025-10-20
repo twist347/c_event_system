@@ -20,11 +20,12 @@ void handle_event_type_a_and_b(const es_event_t *event, es_event_bus_t *bus, voi
             printf("A\n");
             es_publish(bus, EV_TYPE_C);
             break;
-        case EV_TYPE_B:
+        case EV_TYPE_B: {
             ES_EV_EXPECT(event, int);
             const int x = ES_EV_VAL(event, int);
             printf("B %d\n", x);
             break;
+        }
         default:
             break;
     }
@@ -41,11 +42,12 @@ void handle_event_type_c_and_d(const es_event_t *event, es_event_bus_t *bus, voi
             printf("C %d\n", user_ctx.x);
             break;
         }
-        case EV_TYPE_D:
+        case EV_TYPE_D: {
             printf("D\n");
             const int x = 5;
             es_publish_data(bus, EV_TYPE_B, &x, sizeof(int));
             break;
+        }
         default:
             break;
     }
@@ -61,6 +63,7 @@ void register_events(es_event_bus_t *bus) {
 
 int main(void) {
     es_event_bus_t *bus = es_bus_create();
+    assert(bus);
 
     register_events(bus);
 

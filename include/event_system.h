@@ -1,22 +1,30 @@
 #pragma once
 
-#include "event.h"
-
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <assert.h>
 
+#include "event.h"
+
 #ifdef __cplusplus
 extern "C" {
 
+
 #endif
 
-#define ES_EV_EXPECT(ev, T)                                         \
-do {                                                                \
-    assert((ev) != NULL);                                           \
-    assert(es_get_event_data((ev)) != NULL);                        \
-    assert(es_get_event_data_size((ev)) == sizeof(T));              \
+#ifdef __cplusplus
+#define ES_ALIGNOF(T) alignof(T)
+#else
+#define ES_ALIGNOF(T) _Alignof(T)
+#endif
+
+#define ES_EV_EXPECT(ev, T)                                                           \
+do {                                                                                  \
+    assert((ev) != NULL);                                                             \
+    assert(es_get_event_data((ev)) != NULL);                                          \
+    assert(((uintptr_t)es_get_event_data((ev)) % (uintptr_t)ES_ALIGNOF(T)) == 0);     \
+    assert(es_get_event_data_size((ev)) == sizeof(T));                                \
 } while (0)
 
 #define ES_EV_VAL(ev, T)     (*(const T *)(es_get_event_data((ev))))
@@ -25,14 +33,16 @@ do {                                                                \
 #define ES_CTX_EXPECT(ctx, T)                                       \
 do {                                                                \
     assert((ctx) != NULL);                                          \
-    assert(((uintptr_t)(ctx) % (uintptr_t)_Alignof(T)) == 0);       \
+    assert(((uintptr_t)(ctx) % (uintptr_t)ES_ALIGNOF(T)) == 0);     \
 } while (0)
 
 #define ES_CTX_VAL(ctx, T)     (*(const T *)(ctx))
 #define ES_CTX_PTR(ctx, T)     ((T *)(ctx))
 #define ES_CTX_CPTR(ctx, T)    ((const T *)(ctx))
 
+#ifndef ES_MAX_HANDLERS_PER_TYPE
 #define ES_MAX_HANDLERS_PER_TYPE 32
+#endif
 
 typedef struct es_event_t es_event_t;
 typedef struct es_event_bus_t es_event_bus_t;
