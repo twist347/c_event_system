@@ -15,7 +15,7 @@ void handle_event_type_a_and_b(const es_event_t *event, es_event_bus_t *bus, voi
 
     UNUSED(ctx);
 
-    switch (event->type) {
+    switch (es_get_event_type(event)) {
         case EV_TYPE_A:
             printf("A\n");
             es_publish(bus, EV_TYPE_C);
@@ -34,7 +34,7 @@ void handle_event_type_c_and_d(const es_event_t *event, es_event_bus_t *bus, voi
     assert(event);
     assert(bus);
 
-    switch (event->type) {
+    switch (es_get_event_type(event)) {
         case EV_TYPE_C: {
             ES_CTX_EXPECT(ctx, user_ctx_t);
             const user_ctx_t user_ctx = ES_CTX_VAL(ctx, user_ctx_t);
@@ -43,9 +43,8 @@ void handle_event_type_c_and_d(const es_event_t *event, es_event_bus_t *bus, voi
         }
         case EV_TYPE_D:
             printf("D\n");
-            int x = 5;
-            const es_event_t e = {.type = EV_TYPE_B, .data = &x, .data_size = sizeof(x)};
-            es_publish_ev(bus, &e);
+            const int x = 5;
+            es_publish_data(bus, EV_TYPE_B, &x, sizeof(int));
             break;
         default:
             break;
@@ -61,7 +60,7 @@ void register_events(es_event_bus_t *bus) {
 }
 
 int main(void) {
-    es_event_bus_t *bus = es_create();
+    es_event_bus_t *bus = es_bus_create();
 
     register_events(bus);
 
@@ -69,5 +68,5 @@ int main(void) {
     es_publish(bus, EV_TYPE_C);
     es_publish(bus, EV_TYPE_D);
 
-    es_destroy(bus);
+    es_bus_destroy(bus);
 }
