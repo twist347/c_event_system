@@ -36,6 +36,17 @@ do {                                                                \
     assert(((uintptr_t)(ctx) % (uintptr_t)ES_ALIGNOF(T)) == 0);     \
 } while (0)
 
+#define ES_PUBLISH_LDATA(bus, type, val)                            \
+do {                                                                \
+    es_publish_data((bus), (type), &(val), sizeof(val));            \
+} while (0)
+
+#define ES_PUBLISH_RDATA(bus, type, T, expr)                        \
+do {                                                                \
+    T _es_tmp = (expr);                                             \
+    es_publish_data((bus), (type), &_es_tmp, sizeof(T));            \
+} while (0)
+
 #define ES_CTX_VAL(ctx, T)     (*(const T *)(ctx))
 #define ES_CTX_PTR(ctx, T)     ((T *)(ctx))
 #define ES_CTX_CPTR(ctx, T)    ((const T *)(ctx))

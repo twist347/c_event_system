@@ -45,7 +45,9 @@ void handle_event_type_c_and_d(const es_event_t *event, es_event_bus_t *bus, voi
         case EV_TYPE_D: {
             printf("D\n");
             const int x = 5;
-            es_publish_data(bus, EV_TYPE_B, &x, sizeof(int));
+            ES_PUBLISH_LDATA(bus, EV_TYPE_B, x);
+            // or
+            // ES_PUBLISH_RDATA(bus, EV_TYPE_B, int, 5);
             break;
         }
         default:
