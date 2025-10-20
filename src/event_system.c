@@ -91,6 +91,7 @@ bool es_subscribe(es_event_bus_t *bus, es_event_type_e type, es_event_handler_f 
 
 bool es_unsubscribe(es_event_bus_t *bus, es_event_type_e type, es_event_handler_f handler, void *ctx) {
     assert(bus);
+    assert(handler);
 
     if (!ES_VALID_TYPE(type)) {
         return false;
