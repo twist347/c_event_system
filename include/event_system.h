@@ -5,8 +5,6 @@
 #include <stdbool.h>
 #include <assert.h>
 
-#include "event.h"
-
 #ifdef __cplusplus
 extern "C" {
 
@@ -54,6 +52,13 @@ do {                                                                \
 #ifndef ES_MAX_HANDLERS_PER_TYPE
 #define ES_MAX_HANDLERS_PER_TYPE 32
 #endif
+
+typedef enum {
+#define ES_ADD_EVENT_TYPE(E) E,
+#include "../events.def"
+#undef ES_ADD_EVENT_TYPE
+    EV_TYPE__COUNT
+} es_event_type_e;
 
 typedef struct es_event_t es_event_t;
 typedef struct es_event_bus_t es_event_bus_t;
