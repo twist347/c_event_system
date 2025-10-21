@@ -1,10 +1,8 @@
 #pragma once
 
 typedef enum {
-    EV_TYPE_A = 0,
-    EV_TYPE_B,
-    EV_TYPE_C,
-    EV_TYPE_D,
-
+#define X(E) E,
+#include "../events.def"
+#undef X
     EV_TYPE__COUNT
 } es_event_type_e;
