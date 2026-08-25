@@ -1,36 +1,37 @@
 #include "event_system.h"
 
+#include <assert.h>
 #include <stdlib.h>
 
 #define ES_VALID_TYPE(bus, t) \
     ((t) >= 0 && (size_t) (t) < (bus)->event_type_count)
 
-static void compact_remove(es_event_bus_t *bus, es_event_type_t t, size_t idx);
+static void compact_remove(es_EventBus *bus, es_EventType type, size_t idx);
 
-struct es_event_t {
-    es_event_type_t type;
+struct es_Event {
+    es_EventType type;
     const void *data;
     size_t data_size;
 };
 
 typedef struct {
-    es_event_handler_fn handler;
+    es_EventHandler handler;
     void *ctx;
-} es_subscription_t;
+} es_Subscription;
 
-struct es_event_bus_t {
+struct es_EventBus {
     size_t event_type_count;
     size_t *counts;
-    es_subscription_t (*handlers)[ES_MAX_HANDLERS_PER_TYPE];
+    es_Subscription (*handlers)[ES_MAX_HANDLERS_PER_TYPE];
     size_t dispatch_depth;
 };
 
-es_event_bus_t *es_bus_create(size_t event_type_count) {
+es_EventBus *es_bus_create(size_t event_type_count) {
     assert(event_type_count > 0);
 
-    es_event_bus_t *bus = malloc(sizeof(es_event_bus_t));
+    es_EventBus *bus = malloc(sizeof(es_EventBus));
     if (!bus) {
-        return NULL;
+        return nullptr;
     }
 
     bus->event_type_count = event_type_count;
@@ -42,12 +43,12 @@ es_event_bus_t *es_bus_create(size_t event_type_count) {
         free(bus->counts);
         free(bus->handlers);
         free(bus);
-        return NULL;
+        return nullptr;
     }
     return bus;
 }
 
-void es_bus_destroy(es_event_bus_t *bus) {
+void es_bus_destroy(es_EventBus *bus) {
     if (!bus) {
         return;
     }
@@ -56,32 +57,33 @@ void es_bus_destroy(es_event_bus_t *bus) {
     free(bus);
 }
 
-void es_bus_reset(es_event_bus_t *bus) {
+void es_bus_reset(es_EventBus *bus) {
     assert(bus);
     assert(bus->dispatch_depth == 0);
+
     memset(bus->counts, 0, sizeof(*bus->counts) * bus->event_type_count);
     memset(bus->handlers, 0, sizeof(*bus->handlers) * bus->event_type_count);
 }
 
-es_event_type_t es_event_get_type(const es_event_t *event) {
-    assert(event);
+es_EventType es_ev_get_type(const es_Event *ev) {
+    assert(ev);
 
-    return event->type;
+    return ev->type;
 }
 
-const void *es_event_get_data(const es_event_t *event) {
-    assert(event);
+const void *es_ev_get_data(const es_Event *ev) {
+    assert(ev);
 
-    return event->data;
+    return ev->data;
 }
 
-size_t es_event_get_data_size(const es_event_t *event) {
-    assert(event);
+size_t es_ev_get_data_size(const es_Event *ev) {
+    assert(ev);
 
-    return event->data_size;
+    return ev->data_size;
 }
 
-bool es_subscribe(es_event_bus_t *bus, es_event_type_t type, es_event_handler_fn handler, void *ctx) {
+bool es_subscribe(es_EventBus *bus, es_EventType type, es_EventHandler handler, void *ctx) {
     assert(bus);
     assert(handler);
 
@@ -108,7 +110,7 @@ bool es_subscribe(es_event_bus_t *bus, es_event_type_t type, es_event_handler_fn
     return true;
 }
 
-bool es_unsubscribe(es_event_bus_t *bus, es_event_type_t type, es_event_handler_fn handler, void *ctx) {
+bool es_unsubscribe(es_EventBus *bus, es_EventType type, es_EventHandler handler, void *ctx) {
     assert(bus);
     assert(handler);
 
@@ -127,7 +129,7 @@ bool es_unsubscribe(es_event_bus_t *bus, es_event_type_t type, es_event_handler_
     return false;
 }
 
-void es_unsubscribe_by_type(es_event_bus_t *bus, es_event_type_t type) {
+void es_unsubscribe_by_type(es_EventBus *bus, es_EventType type) {
     assert(bus);
 
     if (!ES_VALID_TYPE(bus, type)) {
@@ -137,13 +139,14 @@ void es_unsubscribe_by_type(es_event_bus_t *bus, es_event_type_t type) {
     bus->counts[type] = 0;
 }
 
-size_t es_unsubscribe_by_ctx(es_event_bus_t *bus, void *ctx) {
+size_t es_unsubscribe_by_ctx(es_EventBus *bus, const void *ctx) {
     assert(bus);
+
     size_t removed = 0;
     for (size_t t = 0; t < bus->event_type_count; ++t) {
         for (size_t i = 0; i < bus->counts[t];) {
             if (bus->handlers[t][i].ctx == ctx) {
-                compact_remove(bus, (es_event_type_t) t, i);
+                compact_remove(bus, (es_EventType) t, i);
                 ++removed;
             } else {
                 ++i;
@@ -153,7 +156,7 @@ size_t es_unsubscribe_by_ctx(es_event_bus_t *bus, void *ctx) {
     return removed;
 }
 
-size_t es_unsubscribe_by_handler(es_event_bus_t *bus, es_event_handler_fn handler) {
+size_t es_unsubscribe_by_handler(es_EventBus *bus, es_EventHandler handler) {
     assert(bus);
     assert(handler);
 
@@ -161,7 +164,7 @@ size_t es_unsubscribe_by_handler(es_event_bus_t *bus, es_event_handler_fn handle
     for (size_t t = 0; t < bus->event_type_count; ++t) {
         for (size_t i = 0; i < bus->counts[t];) {
             if (bus->handlers[t][i].handler == handler) {
-                compact_remove(bus, (es_event_type_t) t, i);
+                compact_remove(bus, (es_EventType) t, i);
                 ++removed;
             } else {
                 ++i;
@@ -171,9 +174,9 @@ size_t es_unsubscribe_by_handler(es_event_bus_t *bus, es_event_handler_fn handle
     return removed;
 }
 
-bool es_publish_data(es_event_bus_t *bus, es_event_type_t type, const void *data, size_t data_size) {
+bool es_publish_data(es_EventBus *bus, es_EventType type, const void *data, size_t data_size) {
     assert(bus);
-    assert((data == NULL) == (data_size == 0));
+    assert((data == nullptr) == (data_size == 0));
 
     if (!ES_VALID_TYPE(bus, type)) {
         return false;
@@ -184,35 +187,35 @@ bool es_publish_data(es_event_bus_t *bus, es_event_type_t type, const void *data
         return false;
     }
 
-    const es_event_t event = {.type = type, .data = data, .data_size = data_size};
+    const es_Event ev = {.type = type, .data = data, .data_size = data_size};
 
-    const size_t n = bus->counts[event.type];
+    const size_t n = bus->counts[ev.type];
     assert(n <= ES_MAX_HANDLERS_PER_TYPE);
     if (n == 0) {
         return true;
     }
 
-    es_subscription_t snap[ES_MAX_HANDLERS_PER_TYPE];
-    memcpy(snap, bus->handlers[event.type], n * sizeof(es_subscription_t));
+    es_Subscription snap[ES_MAX_HANDLERS_PER_TYPE];
+    memcpy(snap, bus->handlers[ev.type], n * sizeof(es_Subscription));
 
     ++bus->dispatch_depth;
     for (size_t i = 0; i < n; ++i) {
-        if (snap[i].handler) {
-            snap[i].handler(&event, bus, snap[i].ctx);
-        }
+        snap[i].handler(&ev, bus, snap[i].ctx);
     }
     --bus->dispatch_depth;
 
     return true;
 }
 
-bool es_publish(es_event_bus_t *bus, es_event_type_t type) {
-    return es_publish_data(bus, type, NULL, 0);
+bool es_publish(es_EventBus *bus, es_EventType type) {
+    assert(bus);
+
+    return es_publish_data(bus, type, nullptr, 0);
 }
 
-static void compact_remove(es_event_bus_t *bus, es_event_type_t t, size_t idx) {
-    es_subscription_t *arr = bus->handlers[t];
-    const size_t n = bus->counts[t];
+static void compact_remove(es_EventBus *bus, es_EventType type, size_t idx) {
+    es_Subscription *arr = bus->handlers[type];
+    const size_t n = bus->counts[type];
     memmove(&arr[idx], &arr[idx + 1], (n - idx - 1) * sizeof(arr[0]));
-    bus->counts[t] = n - 1;
+    bus->counts[type] = n - 1;
 }
