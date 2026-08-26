@@ -1,4 +1,4 @@
-#include "es/event_system.h"
+#include "eb/event_bus.h"
 
 #include <assert.h>
 #include <stdlib.h>
@@ -18,37 +18,37 @@
 // Invariants:
 //   * len[t] is the used-slot border, NOT the number of live handlers;
 //   * dispatch_depth == 0  =>  total_dead == 0, i.e. the array is dense
-//     outside a dispatch, so es_subscribe may simply append;
+//     outside a dispatch, so eb_subscribe may simply append;
 //   * a dispatch loop fixes its upper bound before calling anything, so a
 //     subscription appended during dispatch cannot see the event in flight.
 
-static void mark_dead(es_EventBus *bus, es_EventType type, size_t idx);
+static void mark_dead(eb_EventBus *bus, eb_EventType type, size_t idx);
 
-static void compact_type(es_EventBus *bus, es_EventType type);
+static void compact_type(eb_EventBus *bus, eb_EventType type);
 
-static void compact_all(es_EventBus *bus);
+static void compact_all(eb_EventBus *bus);
 
 /* ========== event ========== */
 
-struct es_Event {
-    es_EventType type;
+struct eb_Event {
+    eb_EventType type;
     const void *data;
     size_t data_size;
 };
 
-es_EventType es_ev_type(const es_Event *ev) {
+eb_EventType eb_ev_type(const eb_Event *ev) {
     assert(ev);
 
     return ev->type;
 }
 
-const void *es_ev_data(const es_Event *ev) {
+const void *eb_ev_data(const eb_Event *ev) {
     assert(ev);
 
     return ev->data;
 }
 
-size_t es_ev_data_size(const es_Event *ev) {
+size_t eb_ev_data_size(const eb_Event *ev) {
     assert(ev);
 
     return ev->data_size;
@@ -57,23 +57,23 @@ size_t es_ev_data_size(const es_Event *ev) {
 /* ========== event bus ========== */
 
 typedef struct {
-    es_EventHandler handler;
+    eb_EventHandler handler;
     void *ctx;
 } Subscription;
 
-struct es_EventBus {
+struct eb_EventBus {
     size_t event_type_count;
     size_t *len;
     size_t *dead;
     size_t total_dead;
-    Subscription (*subs)[ES_MAX_HANDLERS_PER_TYPE];
+    Subscription (*subs)[EB_MAX_HANDLERS_PER_TYPE];
     size_t dispatch_depth;
 };
 
-es_EventBus *es_bus_create(size_t event_type_count) {
+eb_EventBus *eb_bus_create(size_t event_type_count) {
     assert(event_type_count > 0);
 
-    es_EventBus *bus = malloc(sizeof(es_EventBus));
+    eb_EventBus *bus = malloc(sizeof(eb_EventBus));
     if (!bus) {
         return nullptr;
     }
@@ -95,7 +95,7 @@ es_EventBus *es_bus_create(size_t event_type_count) {
     return bus;
 }
 
-void es_bus_destroy(es_EventBus *bus) {
+void eb_bus_destroy(eb_EventBus *bus) {
     if (!bus) {
         return;
     }
@@ -105,7 +105,7 @@ void es_bus_destroy(es_EventBus *bus) {
     free(bus);
 }
 
-void es_bus_reset(es_EventBus *bus) {
+void eb_bus_reset(eb_EventBus *bus) {
     assert(bus);
     assert(bus->dispatch_depth == 0);
 
@@ -117,7 +117,7 @@ void es_bus_reset(es_EventBus *bus) {
 
 /* ========== event bus subs ========== */
 
-bool es_subscribe(es_EventBus *bus, es_EventType type, es_EventHandler handler, void *ctx) {
+bool eb_subscribe(eb_EventBus *bus, eb_EventType type, eb_EventHandler handler, void *ctx) {
     assert(bus);
     assert(handler);
 
@@ -136,7 +136,7 @@ bool es_subscribe(es_EventBus *bus, es_EventType type, es_EventHandler handler, 
 
     // append only: reusing a dead slot would expose the new handler to a
     // dispatch already in flight
-    if (n >= ES_MAX_HANDLERS_PER_TYPE) {
+    if (n >= EB_MAX_HANDLERS_PER_TYPE) {
         return false;
     }
 
@@ -148,7 +148,7 @@ bool es_subscribe(es_EventBus *bus, es_EventType type, es_EventHandler handler, 
     return true;
 }
 
-bool es_unsubscribe(es_EventBus *bus, es_EventType type, es_EventHandler handler, void *ctx) {
+bool eb_unsubscribe(eb_EventBus *bus, eb_EventType type, eb_EventHandler handler, void *ctx) {
     assert(bus);
     assert(handler);
 
@@ -170,7 +170,7 @@ bool es_unsubscribe(es_EventBus *bus, es_EventType type, es_EventHandler handler
     return false;
 }
 
-void es_unsubscribe_by_type(es_EventBus *bus, es_EventType type) {
+void eb_unsubscribe_by_type(eb_EventBus *bus, eb_EventType type) {
     assert(bus);
 
     if (!TYPE_IS_VALID(bus, type)) {
@@ -189,7 +189,7 @@ void es_unsubscribe_by_type(es_EventBus *bus, es_EventType type) {
     }
 }
 
-size_t es_unsubscribe_by_ctx(es_EventBus *bus, const void *ctx) {
+size_t eb_unsubscribe_by_ctx(eb_EventBus *bus, const void *ctx) {
     assert(bus);
 
     size_t removed = 0;
@@ -198,7 +198,7 @@ size_t es_unsubscribe_by_ctx(es_EventBus *bus, const void *ctx) {
         for (size_t i = 0; i < n; ++i) {
             const Subscription *s = &bus->subs[t][i];
             if (s->handler && s->ctx == ctx) {
-                mark_dead(bus, (es_EventType) t, i);
+                mark_dead(bus, (eb_EventType) t, i);
                 ++removed;
             }
         }
@@ -210,7 +210,7 @@ size_t es_unsubscribe_by_ctx(es_EventBus *bus, const void *ctx) {
     return removed;
 }
 
-size_t es_unsubscribe_by_handler(es_EventBus *bus, es_EventHandler handler) {
+size_t eb_unsubscribe_by_handler(eb_EventBus *bus, eb_EventHandler handler) {
     assert(bus);
     assert(handler);
 
@@ -219,7 +219,7 @@ size_t es_unsubscribe_by_handler(es_EventBus *bus, es_EventHandler handler) {
         const size_t n = bus->len[t];
         for (size_t i = 0; i < n; ++i) {
             if (bus->subs[t][i].handler == handler) {
-                mark_dead(bus, (es_EventType) t, i);
+                mark_dead(bus, (eb_EventType) t, i);
                 ++removed;
             }
         }
@@ -231,7 +231,7 @@ size_t es_unsubscribe_by_handler(es_EventBus *bus, es_EventHandler handler) {
     return removed;
 }
 
-size_t es_count_subscribers(const es_EventBus *bus, es_EventType type) {
+size_t eb_count_subscribers(const eb_EventBus *bus, eb_EventType type) {
     assert(bus);
 
     if (!TYPE_IS_VALID(bus, type)) {
@@ -244,7 +244,7 @@ size_t es_count_subscribers(const es_EventBus *bus, es_EventType type) {
 
 /* ========== event bus publish ========== */
 
-bool es_publish_data(es_EventBus *bus, es_EventType type, const void *data, size_t data_size) {
+bool eb_publish_data(eb_EventBus *bus, eb_EventType type, const void *data, size_t data_size) {
     assert(bus);
     assert((data == nullptr) == (data_size == 0));
 
@@ -252,17 +252,17 @@ bool es_publish_data(es_EventBus *bus, es_EventType type, const void *data, size
         return false;
     }
 
-    if (bus->dispatch_depth >= ES_MAX_DISPATCH_DEPTH) {
-        assert(0 && "es_publish_data: dispatch depth limit exceeded");
+    if (bus->dispatch_depth >= EB_MAX_DISPATCH_DEPTH) {
+        assert(0 && "eb_publish_data: dispatch depth limit exceeded");
         return false;
     }
 
-    const es_Event ev = {.type = type, .data = data, .data_size = data_size};
+    const eb_Event ev = {.type = type, .data = data, .data_size = data_size};
 
     // fixed before any handler runs: subscriptions appended during dispatch
     // stay out of this event
     const size_t n = bus->len[ev.type];
-    assert(n <= ES_MAX_HANDLERS_PER_TYPE);
+    assert(n <= EB_MAX_HANDLERS_PER_TYPE);
     if (n == 0) {
         return true;
     }
@@ -287,15 +287,15 @@ bool es_publish_data(es_EventBus *bus, es_EventType type, const void *data, size
     return true;
 }
 
-bool es_publish(es_EventBus *bus, es_EventType type) {
+bool eb_publish(eb_EventBus *bus, eb_EventType type) {
     assert(bus);
 
-    return es_publish_data(bus, type, nullptr, 0);
+    return eb_publish_data(bus, type, nullptr, 0);
 }
 
 /* ========== internal ========== */
 
-static void mark_dead(es_EventBus *bus, es_EventType type, size_t idx) {
+static void mark_dead(eb_EventBus *bus, eb_EventType type, size_t idx) {
     assert(bus->subs[type][idx].handler);
 
     bus->subs[type][idx].handler = nullptr;
@@ -304,7 +304,7 @@ static void mark_dead(es_EventBus *bus, es_EventType type, size_t idx) {
     ++bus->total_dead;
 }
 
-static void compact_type(es_EventBus *bus, es_EventType type) {
+static void compact_type(eb_EventBus *bus, eb_EventType type) {
     assert(bus->dispatch_depth == 0);
 
     const size_t dead = bus->dead[type];
@@ -329,8 +329,8 @@ static void compact_type(es_EventBus *bus, es_EventType type) {
     bus->total_dead -= dead;
 }
 
-static void compact_all(es_EventBus *bus) {
+static void compact_all(eb_EventBus *bus) {
     for (size_t t = 0; t < bus->event_type_count && bus->total_dead > 0; ++t) {
-        compact_type(bus, (es_EventType) t);
+        compact_type(bus, (eb_EventType) t);
     }
 }

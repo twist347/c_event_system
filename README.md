@@ -1,6 +1,6 @@
 # C Event Bus
 
-[![ci](https://github.com/twist347/c_event_system/actions/workflows/ci.yml/badge.svg)](https://github.com/twist347/c_event_system/actions/workflows/ci.yml)
+[![ci](https://github.com/twist347/c_event_bus/actions/workflows/ci.yml/badge.svg)](https://github.com/twist347/c_event_bus/actions/workflows/ci.yml)
 
 A tiny synchronous event bus for **C23** (callable from **C++20**).  
 FIFO delivery, safe subscribe/unsubscribe even from inside handlers.
@@ -17,23 +17,23 @@ FIFO delivery, safe subscribe/unsubscribe even from inside handlers.
 - **Unsubscribe is immediate, so the result depends on registration order.**
   A handler removed during a publish is skipped, unless the dispatch had already
   reached it. Freeing that handler's `ctx` on the spot is safe.
-- **Capped at `ES_MAX_HANDLERS_PER_TYPE` (32) handlers per event type.**
-  `es_subscribe` returns `false` once a type is full.
+- **Capped at `EB_MAX_HANDLERS_PER_TYPE` (32) handlers per event type.**
+  `eb_subscribe` returns `false` once a type is full.
 - **Subscribe can fail during a publish** if the type is at capacity: slots
   freed earlier in the same dispatch are reclaimed only after it returns.
 - **Single-threaded.** No internal locking — call from one thread only.
 - **Bounded recursion.** Nested publishes are capped at
-  `ES_MAX_DISPATCH_DEPTH` levels (default 32). Hitting the cap drops
+  `EB_MAX_DISPATCH_DEPTH` levels (default 32). Hitting the cap drops
   the event and asserts in debug builds.
 
 ## Complexity & memory
 - `subscribe` / `unsubscribe` / `publish`: **O(n)** in handlers per type.
-- Storage is preallocated: `event_type_count × ES_MAX_HANDLERS_PER_TYPE` slots — fixed cost, no reallocs.
+- Storage is preallocated: `event_type_count × EB_MAX_HANDLERS_PER_TYPE` slots — fixed cost, no reallocs.
 
 ## Usage
 
 ```c
-#include "es/event_system.h"
+#include "eb/event_bus.h"
 #include <stdio.h>
 
 typedef enum : int32_t {
@@ -44,25 +44,25 @@ typedef enum : int32_t {
 
 typedef struct { int hp; } DamageEvt;
 
-void on_player_damaged(const es_Event *ev, es_EventBus *bus, void *ctx) {
+void on_player_damaged(const eb_Event *ev, eb_EventBus *bus, void *ctx) {
     (void) bus;
     (void) ctx;
 
-    ES_EV_EXPECT(ev, DamageEvt);
-    const DamageEvt *d = ES_EV_CPTR(ev, DamageEvt);
+    EB_EV_EXPECT(ev, DamageEvt);
+    const DamageEvt *d = EB_EV_CPTR(ev, DamageEvt);
     printf("player lost %d hp\n", d->hp);
 }
 
 int main(void) {
-    es_EventBus *bus = es_bus_create(EV_COUNT);
+    eb_EventBus *bus = eb_bus_create(EV_COUNT);
 
-    [[maybe_unused]] bool ok = es_subscribe(bus, EV_PLAYER_DAMAGED, on_player_damaged, nullptr);
+    [[maybe_unused]] bool ok = eb_subscribe(bus, EV_PLAYER_DAMAGED, on_player_damaged, nullptr);
     assert(ok);
 
     DamageEvt d = {.hp = 5};
-    ES_PUBLISH(bus, EV_PLAYER_DAMAGED, d);
+    EB_PUBLISH(bus, EV_PLAYER_DAMAGED, d);
 
-    es_bus_destroy(bus);
+    eb_bus_destroy(bus);
 }
 ```
 
@@ -102,22 +102,22 @@ nothing has to be repeated on your side.
 
 ```cmake
 include(FetchContent)
-FetchContent_Declare(c_event_system
-    GIT_REPOSITORY https://github.com/twist347/c_event_system.git
+FetchContent_Declare(c_event_bus
+    GIT_REPOSITORY https://github.com/twist347/c_event_bus.git
     GIT_TAG main)
-FetchContent_MakeAvailable(c_event_system)
+FetchContent_MakeAvailable(c_event_bus)
 
-target_link_libraries(my_app PRIVATE es::event_system)
+target_link_libraries(my_app PRIVATE eb::event_bus)
 ```
 
 ### Submodule
 
 ```cmake
-add_subdirectory(third_party/c_event_system)
-target_link_libraries(my_app PRIVATE es::event_system)
+add_subdirectory(third_party/c_event_bus)
+target_link_libraries(my_app PRIVATE eb::event_bus)
 ```
 
 ### Vendoring
 
-It is one `.c` file — dropping `src/event_system.c` and `include/es/` straight
+It is one `.c` file — dropping `src/event_bus.c` and `include/es/` straight
 into your own tree works too. Compile with `-std=c23`.
