@@ -78,7 +78,16 @@ void es_bus_reset(es_EventBus *bus);
 [[nodiscard]] const void *es_ev_get_data(const es_Event *ev);
 [[nodiscard]] size_t es_ev_get_data_size(const es_Event *ev);
 
+// Subscribing during dispatch does not affect the event in flight. It fails if
+// the type is at capacity, even when it holds slots freed earlier in the same
+// dispatch (those are reclaimed only after the outermost dispatch returns).
 [[nodiscard]] bool es_subscribe(es_EventBus *bus, es_EventType type, es_EventHandler handler, void *ctx);
+
+// Every removal below takes effect immediately: a handler removed during
+// dispatch is not called for the event in flight unless the dispatch already
+// reached it. This makes it safe to release a handler's ctx from inside another
+// handler -- es_unsubscribe_by_ctx in particular is the teardown call for an
+// object that dies in response to an event.
 [[nodiscard]] bool es_unsubscribe(es_EventBus *bus, es_EventType type, es_EventHandler handler, void *ctx);
 void es_unsubscribe_by_type(es_EventBus *bus, es_EventType type);
 [[nodiscard]] size_t es_unsubscribe_by_ctx(es_EventBus *bus, const void *ctx);
