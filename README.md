@@ -1,21 +1,22 @@
 # C Event Bus
 
 A tiny synchronous event bus for **C23** (callable from **C++20**).  
-FIFO delivery, safe subscribe/unsubscribe even from inside handlers (via snapshotting).
+FIFO delivery, safe subscribe/unsubscribe even from inside handlers.
 
 ## Features
 - **Synchronous** `publish`: handlers run before the call returns.
 - **FIFO order**: handlers are invoked in registration order.
-- **Stable iteration**: subscribing/unsubscribing inside a handler doesn't affect the current dispatch (snapshot).
+- **Mutation-safe dispatch**: unsubscribing inside a handler takes effect immediately; subscribing never feeds the event in flight.
 - **Zero-copy payloads**: pass a pointer + size; no allocations in the hot path.
 - **C++ friendly**: functions are `extern "C"`.
 - **No deps** beyond the standard library.
 
 ## Caveats
-- **Snapshot is taken at the start of dispatch.** If a handler unsubscribes
-  itself or another handler during a publish, the already-snapshotted entries
-  will still be invoked for that publish. Do not free a handler's `ctx`
-  before the publish call returns.
+- **Unsubscribe is immediate, so the result depends on registration order.**
+  A handler removed during a publish is skipped, unless the dispatch had already
+  reached it. Freeing that handler's `ctx` on the spot is safe.
+- **Subscribe can fail during a publish** if the type is at capacity: slots
+  freed earlier in the same dispatch are reclaimed only after it returns.
 - **Single-threaded.** No internal locking — call from one thread only.
 - **Bounded recursion.** Nested publishes are capped at
   `ES_MAX_DISPATCH_DEPTH` levels (default 32). Hitting the cap drops
@@ -28,7 +29,7 @@ FIFO delivery, safe subscribe/unsubscribe even from inside handlers (via snapsho
 ## Usage
 
 ```c
-#include "event_system.h"
+#include "es/event_system.h"
 #include <stdio.h>
 
 typedef enum : int32_t {
@@ -39,7 +40,10 @@ typedef enum : int32_t {
 
 typedef struct { int hp; } DamageEvt;
 
-ES_HANDLER(on_player_damaged) {
+void on_player_damaged(const es_Event *ev, es_EventBus *bus, void *ctx) {
+    (void) bus;
+    (void) ctx;
+
     ES_EV_EXPECT(ev, DamageEvt);
     const DamageEvt *d = ES_EV_CPTR(ev, DamageEvt);
     printf("player lost %d hp\n", d->hp);

@@ -18,13 +18,13 @@ typedef struct {
     int x;
 } MyCtx;
 
-void handle_event_type_a_and_b(const es_Event *ev, es_EventBus *bus, void *ctx) {
+static void handle_event_type_a_and_b(const es_Event *ev, es_EventBus *bus, void *ctx) {
     assert(ev);
     assert(bus);
 
     UNUSED(ctx);
 
-    switch (es_ev_get_type(ev)) {
+    switch (es_ev_type(ev)) {
         case MY_EV_TYPE_A:
             printf("A\n");
             [[maybe_unused]] bool ok = es_publish(bus, MY_EV_TYPE_C);
@@ -41,11 +41,11 @@ void handle_event_type_a_and_b(const es_Event *ev, es_EventBus *bus, void *ctx) 
     }
 }
 
-void handle_event_type_c_and_d(const es_Event *ev, es_EventBus *bus, void *ctx) {
+static void handle_event_type_c_and_d(const es_Event *ev, es_EventBus *bus, void *ctx) {
     assert(ev);
     assert(bus);
 
-    switch (es_ev_get_type(ev)) {
+    switch (es_ev_type(ev)) {
         case MY_EV_TYPE_C: {
             ES_CTX_EXPECT(ctx, MyCtx);
             const MyCtx user_ctx = ES_CTX_VAL(ctx, MyCtx);
@@ -63,7 +63,7 @@ void handle_event_type_c_and_d(const es_Event *ev, es_EventBus *bus, void *ctx) 
     }
 }
 
-void register_events(es_EventBus *bus) {
+static void register_events(es_EventBus *bus) {
     static MyCtx ctx = {.x = 10};
 
     [[maybe_unused]] bool ok = es_subscribe(bus, MY_EV_TYPE_A, handle_event_type_a_and_b, nullptr);

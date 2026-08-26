@@ -13,28 +13,77 @@
 extern "C" {
 #endif
 
-// === event payload access ===
+/* ========== event ========== */
 
-#define ES_EV_EXPECT(ev, T)                                                     \
-do {                                                                            \
-    [[maybe_unused]] const es_Event *es_ev_ = (ev);                             \
-    assert(es_ev_);                                                             \
-    assert(es_ev_get_data(es_ev_));                                             \
-    assert(((uintptr_t) es_ev_get_data(es_ev_) % (uintptr_t) alignof(T)) == 0); \
-    assert(es_ev_get_data_size(es_ev_) == sizeof(T));                           \
+typedef int32_t es_EventType;
+typedef struct es_Event es_Event;
+
+[[nodiscard]]
+es_EventType es_ev_type(const es_Event *ev);
+
+[[nodiscard]]
+const void *es_ev_data(const es_Event *ev);
+
+[[nodiscard]]
+size_t es_ev_data_size(const es_Event *ev);
+
+#define ES_EV_EXPECT(ev, T)                                                 \
+do {                                                                        \
+    [[maybe_unused]] const es_Event *es_ev_ = (ev);                         \
+    assert(es_ev_);                                                         \
+    assert(es_ev_data(es_ev_));                                             \
+    assert(((uintptr_t) es_ev_data(es_ev_) % (uintptr_t) alignof(T)) == 0); \
+    assert(es_ev_data_size(es_ev_) == sizeof(T));                           \
 } while (0)
 
-#define ES_EV_VAL(ev, T)     (*(const T *)(es_ev_get_data((ev))))
-#define ES_EV_CPTR(ev, T)    ((const T *)(es_ev_get_data((ev))))
+#define ES_EV_VAL(ev, T)     (*(const T *)(es_ev_data((ev))))
+#define ES_EV_CPTR(ev, T)    ((const T *)(es_ev_data((ev))))
 
-#define ES_EV_LOAD(ev, T, dst)                         \
-do {                                                   \
-    const es_Event *es_ev_ = (ev);                     \
-    ES_EV_EXPECT(es_ev_, T);                           \
-    memcpy(&(dst), es_ev_get_data(es_ev_), sizeof(T)); \
+#define ES_EV_LOAD(ev, T, dst)                     \
+do {                                               \
+    const es_Event *es_ev_ = (ev);                 \
+    ES_EV_EXPECT(es_ev_, T);                       \
+    memcpy(&(dst), es_ev_data(es_ev_), sizeof(T)); \
 } while (0)
 
-// === handler ctx access ===
+/* ========== event bus ========== */
+
+typedef struct es_EventBus es_EventBus;
+
+[[nodiscard]]
+es_EventBus *es_bus_create(size_t event_type_count);
+
+void es_bus_destroy(es_EventBus *bus);
+
+void es_bus_reset(es_EventBus *bus);
+
+/* ========== event bus subs ========== */
+
+constexpr size_t ES_MAX_HANDLERS_PER_TYPE = 32;
+
+typedef void (*es_EventHandler)(const es_Event *ev, es_EventBus *bus, void *ctx);
+
+// Subscribing during dispatch does not affect the event in flight. It fails if
+// the type is at capacity, even when it holds slots freed earlier in the same
+// dispatch (those are reclaimed only after the outermost dispatch returns).
+[[nodiscard]]
+bool es_subscribe(es_EventBus *bus, es_EventType type, es_EventHandler handler, void *ctx);
+
+// Every removal below takes effect immediately: a handler removed during
+// dispatch is not called for the event in flight unless the dispatch already
+// reached it. This makes it safe to release a handler's ctx from inside another
+// handler -- es_unsubscribe_by_ctx in particular is the teardown call for an
+// object that dies in response to an event.
+[[nodiscard]]
+bool es_unsubscribe(es_EventBus *bus, es_EventType type, es_EventHandler handler, void *ctx);
+
+void es_unsubscribe_by_type(es_EventBus *bus, es_EventType type);
+
+[[nodiscard]]
+size_t es_unsubscribe_by_ctx(es_EventBus *bus, const void *ctx);
+
+[[nodiscard]]
+size_t es_unsubscribe_by_handler(es_EventBus *bus, es_EventHandler handler);
 
 #define ES_CTX_EXPECT(ctx, T)                                    \
 do {                                                             \
@@ -47,7 +96,15 @@ do {                                                             \
 #define ES_CTX_PTR(ctx, T)     ((T *)(ctx))
 #define ES_CTX_CPTR(ctx, T)    ((const T *)(ctx))
 
-// === public helpers ===
+/* ========== event bus publish ========== */
+
+constexpr size_t ES_MAX_DISPATCH_DEPTH = 32;
+
+[[nodiscard]]
+bool es_publish_data(es_EventBus *bus, es_EventType type, const void *data, size_t data_size);
+
+[[nodiscard]]
+bool es_publish(es_EventBus *bus, es_EventType type);
 
 #ifdef __cplusplus
 #define ES_UNQUAL_(expr) std::remove_cvref_t<decltype(expr)>
@@ -60,41 +117,6 @@ do {                                                                  \
     ES_UNQUAL_(expr) es_tmp_ = (expr);                                \
     (void) es_publish_data((bus), (type), &es_tmp_, sizeof(es_tmp_)); \
 } while (0)
-
-constexpr size_t ES_MAX_HANDLERS_PER_TYPE = 32;
-constexpr size_t ES_MAX_DISPATCH_DEPTH = 32;
-
-typedef int32_t es_EventType;
-
-typedef struct es_Event es_Event;
-typedef struct es_EventBus es_EventBus;
-typedef void (*es_EventHandler)(const es_Event *, es_EventBus *, void *);
-
-[[nodiscard]] es_EventBus *es_bus_create(size_t event_type_count);
-void es_bus_destroy(es_EventBus *bus);
-void es_bus_reset(es_EventBus *bus);
-
-[[nodiscard]] es_EventType es_ev_get_type(const es_Event *ev);
-[[nodiscard]] const void *es_ev_get_data(const es_Event *ev);
-[[nodiscard]] size_t es_ev_get_data_size(const es_Event *ev);
-
-// Subscribing during dispatch does not affect the event in flight. It fails if
-// the type is at capacity, even when it holds slots freed earlier in the same
-// dispatch (those are reclaimed only after the outermost dispatch returns).
-[[nodiscard]] bool es_subscribe(es_EventBus *bus, es_EventType type, es_EventHandler handler, void *ctx);
-
-// Every removal below takes effect immediately: a handler removed during
-// dispatch is not called for the event in flight unless the dispatch already
-// reached it. This makes it safe to release a handler's ctx from inside another
-// handler -- es_unsubscribe_by_ctx in particular is the teardown call for an
-// object that dies in response to an event.
-[[nodiscard]] bool es_unsubscribe(es_EventBus *bus, es_EventType type, es_EventHandler handler, void *ctx);
-void es_unsubscribe_by_type(es_EventBus *bus, es_EventType type);
-[[nodiscard]] size_t es_unsubscribe_by_ctx(es_EventBus *bus, const void *ctx);
-[[nodiscard]] size_t es_unsubscribe_by_handler(es_EventBus *bus, es_EventHandler handler);
-
-[[nodiscard]] bool es_publish_data(es_EventBus *bus, es_EventType type, const void *data, size_t data_size);
-[[nodiscard]] bool es_publish(es_EventBus *bus, es_EventType type);
 
 #ifdef __cplusplus
 }
