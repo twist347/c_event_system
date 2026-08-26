@@ -1,98 +1,89 @@
 #include "es/event_system.h"
 
+#include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <assert.h>
+#include <stdlib.h>
 
 #define UNUSED(x) (void) (x)
 
 typedef enum : int32_t {
-    MY_EV_TYPE_A = 0,
-    MY_EV_TYPE_B,
-    MY_EV_TYPE_C,
-    MY_EV_TYPE_D,
-    MY_EV_TYPE_COUNT
-} MyEventType;
+    EV_DAMAGE = 0,
+    EV_DIED,
+    EV_COUNT
+} GameEvent;
 
 typedef struct {
-    int x;
-} MyCtx;
+    const char *name;
+    int hp;
+} Enemy;
 
-static void handle_event_type_a_and_b(const es_Event *ev, es_EventBus *bus, void *ctx) {
-    assert(ev);
-    assert(bus);
+typedef struct {
+    int amount;
+} Damage;
 
-    UNUSED(ctx);
+static void on_damage_apply(const es_Event *ev, es_EventBus *bus, void *ctx) {
+    ES_EV_EXPECT(ev, Damage);
+    ES_CTX_EXPECT(ctx, Enemy);
 
-    switch (es_ev_type(ev)) {
-        case MY_EV_TYPE_A:
-            printf("A\n");
-            [[maybe_unused]] bool ok = es_publish(bus, MY_EV_TYPE_C);
-            assert(ok);
-            break;
-        case MY_EV_TYPE_B: {
-            ES_EV_EXPECT(ev, int);
-            const int x = ES_EV_VAL(ev, int);
-            printf("B %d\n", x);
-            break;
-        }
-        default:
-            break;
+    Enemy *self = ES_CTX_PTR(ctx, Enemy);
+    const Damage dmg = ES_EV_VAL(ev, Damage);
+
+    self->hp -= dmg.amount;
+    printf("%s takes %d damage\n", self->name, dmg.amount);
+
+    if (self->hp <= 0) {
+        [[maybe_unused]] const bool ok = es_publish(bus, EV_DIED);
+        assert(ok);
     }
 }
 
-static void handle_event_type_c_and_d(const es_Event *ev, es_EventBus *bus, void *ctx) {
-    assert(ev);
-    assert(bus);
+static void on_damage_report(const es_Event *ev, es_EventBus *bus, void *ctx) {
+    UNUSED(ev);
+    UNUSED(bus);
+    ES_CTX_EXPECT(ctx, Enemy);
 
-    switch (es_ev_type(ev)) {
-        case MY_EV_TYPE_C: {
-            ES_CTX_EXPECT(ctx, MyCtx);
-            const MyCtx user_ctx = ES_CTX_VAL(ctx, MyCtx);
-            printf("C %d\n", user_ctx.x);
-            break;
-        }
-        case MY_EV_TYPE_D: {
-            printf("D\n");
-            const int x = 5;
-            ES_PUBLISH(bus, MY_EV_TYPE_B, x);
-            break;
-        }
-        default:
-            break;
-    }
+    const Enemy *self = ES_CTX_CPTR(ctx, Enemy);
+    printf("  %s is at %d hp\n", self->name, self->hp);
 }
 
-static void register_events(es_EventBus *bus) {
-    static MyCtx ctx = {.x = 10};
+static void on_died(const es_Event *ev, es_EventBus *bus, void *ctx) {
+    UNUSED(ev);
+    ES_CTX_EXPECT(ctx, Enemy);
 
-    [[maybe_unused]] bool ok = es_subscribe(bus, MY_EV_TYPE_A, handle_event_type_a_and_b, nullptr);
-    assert(ok);
+    Enemy *self = ES_CTX_PTR(ctx, Enemy);
+    printf("  %s died\n", self->name);
 
-    ok = es_subscribe(bus, MY_EV_TYPE_B, handle_event_type_a_and_b, nullptr);
-    assert(ok);
+    const size_t dropped = es_unsubscribe_by_ctx(bus, self);
+    printf("  dropped %zu subscriptions\n", dropped);
 
-    ok = es_subscribe(bus, MY_EV_TYPE_C, handle_event_type_c_and_d, &ctx);
-    assert(ok);
-
-    ok = es_subscribe(bus, MY_EV_TYPE_D, handle_event_type_c_and_d, nullptr);
-    assert(ok);
+    free(self);
 }
 
 int main() {
-    es_EventBus *bus = es_bus_create(MY_EV_TYPE_COUNT);
+    es_EventBus *bus = es_bus_create(EV_COUNT);
     assert(bus);
 
-    register_events(bus);
+    Enemy *goblin = malloc(sizeof(Enemy));
+    assert(goblin);
+    *goblin = (Enemy){.name = "goblin", .hp = 5};
 
-    [[maybe_unused]] bool ok = es_publish(bus, MY_EV_TYPE_A);
+    [[maybe_unused]] bool ok = es_subscribe(bus, EV_DAMAGE, on_damage_apply, goblin);
     assert(ok);
 
-    ok = es_publish(bus, MY_EV_TYPE_C);
+    ok = es_subscribe(bus, EV_DAMAGE, on_damage_report, goblin);
     assert(ok);
 
-    ok = es_publish(bus, MY_EV_TYPE_D);
+    ok = es_subscribe(bus, EV_DIED, on_died, goblin);
     assert(ok);
+
+    Damage light = {.amount = 2};
+    ES_PUBLISH(bus, EV_DAMAGE, light);
+
+    Damage fatal = {.amount = 3};
+    ES_PUBLISH(bus, EV_DAMAGE, fatal); // on_damage_report never runs
+
+    ES_PUBLISH(bus, EV_DAMAGE, light); // nobody is listening any more
 
     es_bus_destroy(bus);
 }

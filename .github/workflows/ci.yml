@@ -1,0 +1,34 @@
+name: ci
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [ Debug, Release ]
+    steps:
+      - uses: actions/checkout@v4
+      - run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DCMAKE_C_COMPILER=clang-22
+      - run: cmake --build build
+      - run: ctest --test-dir build --output-on-failure
+
+  sanitizers:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_C_COMPILER=clang-22
+          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+      - run: cmake --build build
+      - run: ctest --test-dir build --output-on-failure

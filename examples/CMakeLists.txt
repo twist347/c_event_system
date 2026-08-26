@@ -1,7 +1,9 @@
-cmake_minimum_required(VERSION 3.20)
+add_executable(example main.c)
+target_link_libraries(example PRIVATE es::event_system)
+target_compile_options(example PRIVATE -Wall -Wextra -Wpedantic)
 
-set(T main)
-
-add_executable(${T} main.c)
-target_link_libraries(${T} c_event_system)
-target_compile_options(${T} PRIVATE -Wall -Wextra -Wpedantic)
+set_target_properties(example PROPERTIES
+        C_STANDARD 23
+        C_STANDARD_REQUIRED ON
+        C_EXTENSIONS OFF
+)

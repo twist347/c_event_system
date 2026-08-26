@@ -231,6 +231,17 @@ size_t es_unsubscribe_by_handler(es_EventBus *bus, es_EventHandler handler) {
     return removed;
 }
 
+size_t es_count_subscribers(const es_EventBus *bus, es_EventType type) {
+    assert(bus);
+
+    if (!TYPE_IS_VALID(bus, type)) {
+        return 0;
+    }
+
+    // dead slots sit inside the border, so the difference is exact and O(1)
+    return bus->len[type] - bus->dead[type];
+}
+
 /* ========== event bus publish ========== */
 
 bool es_publish_data(es_EventBus *bus, es_EventType type, const void *data, size_t data_size) {

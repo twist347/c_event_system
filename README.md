@@ -1,5 +1,7 @@
 # C Event Bus
 
+[![ci](https://github.com/twist347/c_event_system/actions/workflows/ci.yml/badge.svg)](https://github.com/twist347/c_event_system/actions/workflows/ci.yml)
+
 A tiny synchronous event bus for **C23** (callable from **C++20**).  
 FIFO delivery, safe subscribe/unsubscribe even from inside handlers.
 
@@ -15,6 +17,8 @@ FIFO delivery, safe subscribe/unsubscribe even from inside handlers.
 - **Unsubscribe is immediate, so the result depends on registration order.**
   A handler removed during a publish is skipped, unless the dispatch had already
   reached it. Freeing that handler's `ctx` on the spot is safe.
+- **Capped at `ES_MAX_HANDLERS_PER_TYPE` (32) handlers per event type.**
+  `es_subscribe` returns `false` once a type is full.
 - **Subscribe can fail during a publish** if the type is at capacity: slots
   freed earlier in the same dispatch are reclaimed only after it returns.
 - **Single-threaded.** No internal locking — call from one thread only.
@@ -66,9 +70,54 @@ int main(void) {
 > Never wrap the calls themselves in `assert()`: under `-DNDEBUG` the argument
 > isn't evaluated and nothing runs. Assign, then assert (as above).
 
+## Requirements
+
+GCC or Clang with **C23** support (tested on Linux; macOS and the BSDs should
+work as-is). MSVC is not supported.
+
 ## Build
 
 ```
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
+cmake --build build
 ```
+
+## Testing
+
+```
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+The tests and the example are built only when this project is the top-level one,
+so consuming it via `FetchContent` or `add_subdirectory` does not pull them in.
+
+## Integration
+
+Linking against the target propagates the include path and `-std=c23`, so
+nothing has to be repeated on your side.
+
+### FetchContent
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(c_event_system
+    GIT_REPOSITORY https://github.com/twist347/c_event_system.git
+    GIT_TAG main)
+FetchContent_MakeAvailable(c_event_system)
+
+target_link_libraries(my_app PRIVATE es::event_system)
+```
+
+### Submodule
+
+```cmake
+add_subdirectory(third_party/c_event_system)
+target_link_libraries(my_app PRIVATE es::event_system)
+```
+
+### Vendoring
+
+It is one `.c` file — dropping `src/event_system.c` and `include/es/` straight
+into your own tree works too. Compile with `-std=c23`.
