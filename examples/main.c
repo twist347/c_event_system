@@ -1,4 +1,4 @@
-#include "event_system.h"
+#include "es/event_system.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -18,7 +18,7 @@ typedef struct {
     int x;
 } MyCtx;
 
-ES_HANDLER(handle_event_type_a_and_b) {
+void handle_event_type_a_and_b(const es_Event *ev, es_EventBus *bus, void *ctx) {
     assert(ev);
     assert(bus);
 
@@ -41,7 +41,7 @@ ES_HANDLER(handle_event_type_a_and_b) {
     }
 }
 
-ES_HANDLER(handle_event_type_c_and_d) {
+void handle_event_type_c_and_d(const es_Event *ev, es_EventBus *bus, void *ctx) {
     assert(ev);
     assert(bus);
 

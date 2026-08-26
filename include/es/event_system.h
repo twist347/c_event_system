@@ -61,10 +61,6 @@ do {                                                                  \
     (void) es_publish_data((bus), (type), &es_tmp_, sizeof(es_tmp_)); \
 } while (0)
 
-// Declares a handler. In the body the event is `ev`, the bus is `bus`, the user ctx is `ctx`.
-#define ES_HANDLER(name) \
-    void name(const es_Event *ev, es_EventBus *bus, void *ctx)
-
 constexpr size_t ES_MAX_HANDLERS_PER_TYPE = 32;
 constexpr size_t ES_MAX_DISPATCH_DEPTH = 32;
 
