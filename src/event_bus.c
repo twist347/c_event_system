@@ -16,11 +16,18 @@
 // slots are swept once the outermost dispatch returns.
 //
 // Invariants:
-//   * len[t] is the used-slot border, NOT the number of live handlers;
+//   * len is the used-slot border, NOT the number of live handlers;
 //   * dispatch_depth == 0  =>  total_dead == 0, i.e. the array is dense
 //     outside a dispatch, so eb_subscribe may simply append;
 //   * a dispatch loop fixes its upper bound before calling anything, so a
-//     subscription appended during dispatch cannot see the event in flight.
+//     subscription appended during dispatch cannot see the event in flight;
+//   * slots in [len, cap) are zeroed and never read.
+//
+// Growth: eb_subscribe may realloc from inside a handler, so any Subscription *
+// taken before a call into user code is dangling afterwards. Index the vector
+// instead of holding a pointer across such a call.
+
+static bool grow(eb_EventBus *bus, eb_EventType type);
 
 static void mark_dead(eb_EventBus *bus, eb_EventType type, size_t idx);
 
@@ -61,12 +68,18 @@ typedef struct {
     void *ctx;
 } Subscription;
 
+// Growable, never shrinks: compaction reclaims slots but keeps the capacity.
+typedef struct {
+    Subscription *data;
+    size_t len;
+    size_t cap;
+    size_t dead;
+} SubscriptionVec;
+
 struct eb_EventBus {
     size_t event_type_count;
-    size_t *len;
-    size_t *dead;
+    SubscriptionVec *subs;
     size_t total_dead;
-    Subscription (*subs)[EB_MAX_HANDLERS_PER_TYPE];
     size_t dispatch_depth;
 };
 
@@ -78,17 +91,13 @@ eb_EventBus *eb_bus_create(size_t event_type_count) {
         return nullptr;
     }
 
+    // every vector starts empty; storage is allocated on first subscribe
     bus->event_type_count = event_type_count;
-    bus->len = calloc(event_type_count, sizeof(*bus->len));
-    bus->dead = calloc(event_type_count, sizeof(*bus->dead));
     bus->subs = calloc(event_type_count, sizeof(*bus->subs));
     bus->total_dead = 0;
     bus->dispatch_depth = 0;
 
-    if (!bus->len || !bus->dead || !bus->subs) {
-        free(bus->len);
-        free(bus->dead);
-        free(bus->subs);
+    if (!bus->subs) {
         free(bus);
         return nullptr;
     }
@@ -99,8 +108,9 @@ void eb_bus_destroy(eb_EventBus *bus) {
     if (!bus) {
         return;
     }
-    free(bus->len);
-    free(bus->dead);
+    for (size_t t = 0; t < bus->event_type_count; ++t) {
+        free(bus->subs[t].data);
+    }
     free(bus->subs);
     free(bus);
 }
@@ -109,10 +119,69 @@ void eb_bus_reset(eb_EventBus *bus) {
     assert(bus);
     assert(bus->dispatch_depth == 0);
 
-    memset(bus->len, 0, sizeof(*bus->len) * bus->event_type_count);
-    memset(bus->dead, 0, sizeof(*bus->dead) * bus->event_type_count);
-    memset(bus->subs, 0, sizeof(*bus->subs) * bus->event_type_count);
+    for (size_t t = 0; t < bus->event_type_count; ++t) {
+        SubscriptionVec *v = &bus->subs[t];
+        if (v->len > 0) {
+            memset(v->data, 0, v->len * sizeof(*v->data));
+        }
+        v->len = 0;
+        v->dead = 0;
+    }
     bus->total_dead = 0;
+}
+
+bool eb_bus_reserve(eb_EventBus *bus, eb_EventType type, size_t n) {
+    assert(bus);
+
+    if (!TYPE_IS_VALID(bus, type)) {
+        return false;
+    }
+
+    SubscriptionVec *v = &bus->subs[type];
+    if (n <= v->cap) {
+        return true;
+    }
+
+    if (n > SIZE_MAX / sizeof(*v->data)) {
+        return false;
+    }
+
+    Subscription *data = realloc(v->data, n * sizeof(*data));
+    if (!data) {
+        return false;
+    }
+
+    memset(&data[v->cap], 0, (n - v->cap) * sizeof(*data));
+    v->data = data;
+    v->cap = n;
+
+    return true;
+}
+
+void eb_bus_shrink_to_fit(eb_EventBus *bus) {
+    assert(bus);
+    assert(bus->dispatch_depth == 0);
+    assert(bus->total_dead == 0); // dense outside a dispatch, so len == live
+
+    for (size_t t = 0; t < bus->event_type_count; ++t) {
+        SubscriptionVec *v = &bus->subs[t];
+        if (v->len == v->cap) {
+            continue;
+        }
+
+        if (v->len == 0) {
+            free(v->data);
+            v->data = nullptr;
+            v->cap = 0;
+            continue;
+        }
+
+        Subscription *data = realloc(v->data, v->len * sizeof(*data));
+        if (data) {
+            v->data = data;
+            v->cap = v->len;
+        }
+    }
 }
 
 /* ========== event bus subs ========== */
@@ -125,25 +194,26 @@ bool eb_subscribe(eb_EventBus *bus, eb_EventType type, eb_EventHandler handler, 
         return false;
     }
 
-    const size_t n = bus->len[type];
+    SubscriptionVec *v = &bus->subs[type];
 
     // forbid duplicates; dead slots hold handler == nullptr and never match
+    const size_t n = v->len;
     for (size_t i = 0; i < n; ++i) {
-        if (bus->subs[type][i].handler == handler && bus->subs[type][i].ctx == ctx) {
+        if (v->data[i].handler == handler && v->data[i].ctx == ctx) {
             return false;
         }
     }
 
     // append only: reusing a dead slot would expose the new handler to a
     // dispatch already in flight
-    if (n >= EB_MAX_HANDLERS_PER_TYPE) {
+    if (n == v->cap && !grow(bus, type)) {
         return false;
     }
 
     // FIFO
-    bus->subs[type][n].handler = handler;
-    bus->subs[type][n].ctx = ctx;
-    bus->len[type] = n + 1;
+    v->data[n].handler = handler;
+    v->data[n].ctx = ctx;
+    v->len = n + 1;
 
     return true;
 }
@@ -156,9 +226,10 @@ bool eb_unsubscribe(eb_EventBus *bus, eb_EventType type, eb_EventHandler handler
         return false;
     }
 
-    const size_t n = bus->len[type];
+    SubscriptionVec *v = &bus->subs[type];
+    const size_t n = v->len;
     for (size_t i = 0; i < n; ++i) {
-        if (bus->subs[type][i].handler == handler && bus->subs[type][i].ctx == ctx) {
+        if (v->data[i].handler == handler && v->data[i].ctx == ctx) {
             mark_dead(bus, type, i);
             if (bus->dispatch_depth == 0) {
                 compact_type(bus, type);
@@ -177,9 +248,10 @@ void eb_unsubscribe_by_type(eb_EventBus *bus, eb_EventType type) {
         return;
     }
 
-    const size_t n = bus->len[type];
+    SubscriptionVec *v = &bus->subs[type];
+    const size_t n = v->len;
     for (size_t i = 0; i < n; ++i) {
-        if (bus->subs[type][i].handler) {
+        if (v->data[i].handler) {
             mark_dead(bus, type, i);
         }
     }
@@ -194,10 +266,10 @@ size_t eb_unsubscribe_by_ctx(eb_EventBus *bus, const void *ctx) {
 
     size_t removed = 0;
     for (size_t t = 0; t < bus->event_type_count; ++t) {
-        const size_t n = bus->len[t];
+        SubscriptionVec *v = &bus->subs[t];
+        const size_t n = v->len;
         for (size_t i = 0; i < n; ++i) {
-            const Subscription *s = &bus->subs[t][i];
-            if (s->handler && s->ctx == ctx) {
+            if (v->data[i].handler && v->data[i].ctx == ctx) {
                 mark_dead(bus, (eb_EventType) t, i);
                 ++removed;
             }
@@ -216,9 +288,10 @@ size_t eb_unsubscribe_by_handler(eb_EventBus *bus, eb_EventHandler handler) {
 
     size_t removed = 0;
     for (size_t t = 0; t < bus->event_type_count; ++t) {
-        const size_t n = bus->len[t];
+        SubscriptionVec *v = &bus->subs[t];
+        const size_t n = v->len;
         for (size_t i = 0; i < n; ++i) {
-            if (bus->subs[t][i].handler == handler) {
+            if (v->data[i].handler == handler) {
                 mark_dead(bus, (eb_EventType) t, i);
                 ++removed;
             }
@@ -239,7 +312,7 @@ size_t eb_count_subscribers(const eb_EventBus *bus, eb_EventType type) {
     }
 
     // dead slots sit inside the border, so the difference is exact and O(1)
-    return bus->len[type] - bus->dead[type];
+    return bus->subs[type].len - bus->subs[type].dead;
 }
 
 /* ========== event bus publish ========== */
@@ -259,20 +332,21 @@ bool eb_publish_data(eb_EventBus *bus, eb_EventType type, const void *data, size
 
     const eb_Event ev = {.type = type, .data = data, .data_size = data_size};
 
+    SubscriptionVec *v = &bus->subs[ev.type];
+
     // fixed before any handler runs: subscriptions appended during dispatch
     // stay out of this event
-    const size_t n = bus->len[ev.type];
-    assert(n <= EB_MAX_HANDLERS_PER_TYPE);
+    const size_t n = v->len;
     if (n == 0) {
         return true;
     }
 
     ++bus->dispatch_depth;
     for (size_t i = 0; i < n; ++i) {
-        // re-read the slot every iteration and copy it out: a handler may
-        // kill itself or a peer, and the base pointer may move once the
-        // array becomes growable
-        const Subscription s = bus->subs[ev.type][i];
+        // re-read the slot every iteration and copy it out: a handler may kill
+        // itself or a peer, and a subscribe from inside one may have moved the
+        // base pointer. The vector header itself never moves.
+        const Subscription s = v->data[i];
         if (!s.handler) {
             continue;
         }
@@ -295,25 +369,47 @@ bool eb_publish(eb_EventBus *bus, eb_EventType type) {
 
 /* ========== internal ========== */
 
-static void mark_dead(eb_EventBus *bus, eb_EventType type, size_t idx) {
-    assert(bus->subs[type][idx].handler);
+static bool grow(eb_EventBus *bus, eb_EventType type) {
+    SubscriptionVec *v = &bus->subs[type];
+    assert(v->len == v->cap);
 
-    bus->subs[type][idx].handler = nullptr;
-    bus->subs[type][idx].ctx = nullptr;
-    ++bus->dead[type];
+    const size_t old_cap = v->cap;
+    const size_t cap = old_cap ? old_cap * 2 : 4;
+
+    Subscription *data = realloc(v->data, cap * sizeof(*data));
+    if (!data) {
+        return false;
+    }
+
+    memset(&data[old_cap], 0, (cap - old_cap) * sizeof(*data));
+    v->data = data;
+    v->cap = cap;
+
+    return true;
+}
+
+static void mark_dead(eb_EventBus *bus, eb_EventType type, size_t idx) {
+    SubscriptionVec *v = &bus->subs[type];
+    assert(v->data[idx].handler);
+
+    v->data[idx].handler = nullptr;
+    v->data[idx].ctx = nullptr;
+    ++v->dead;
     ++bus->total_dead;
 }
 
 static void compact_type(eb_EventBus *bus, eb_EventType type) {
     assert(bus->dispatch_depth == 0);
 
-    const size_t dead = bus->dead[type];
+    SubscriptionVec *v = &bus->subs[type];
+
+    const size_t dead = v->dead;
     if (dead == 0) {
         return;
     }
 
-    Subscription *arr = bus->subs[type];
-    const size_t n = bus->len[type];
+    Subscription *arr = v->data;
+    const size_t n = v->len;
 
     size_t w = 0;
     for (size_t r = 0; r < n; ++r) {
@@ -323,9 +419,10 @@ static void compact_type(eb_EventBus *bus, eb_EventType type) {
     }
     assert(w + dead == n);
 
+    // capacity is kept: the vector never shrinks
     memset(&arr[w], 0, dead * sizeof(arr[0]));
-    bus->len[type] = w;
-    bus->dead[type] = 0;
+    v->len = w;
+    v->dead = 0;
     bus->total_dead -= dead;
 }
 

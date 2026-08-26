@@ -14,6 +14,7 @@
 
 #ifdef __cplusplus
 extern "C" {
+
 #endif
 
 /* ========== event ========== */
@@ -70,16 +71,22 @@ void eb_bus_destroy(eb_EventBus *bus);
 /// Drops every subscription, keeps the allocation.
 void eb_bus_reset(eb_EventBus *bus);
 
-/* ========== event bus subs ========== */
+/// Pre-allocates room for `n` subscribers on `type`, so eb_subscribe cannot fail
+/// on allocation until that many are registered.
+[[nodiscard]]
+bool eb_bus_reserve(eb_EventBus *bus, eb_EventType type, size_t n);
 
-/// Hard cap per event type; eb_subscribe fails past it.
-constexpr size_t EB_MAX_HANDLERS_PER_TYPE = 32;
+/// Releases per-type capacity no live subscription is using; a type with none
+/// frees its storage outright. Not callable during a dispatch.
+void eb_bus_shrink_to_fit(eb_EventBus *bus);
+
+/* ========== event bus subs ========== */
 
 typedef void (*eb_EventHandler)(const eb_Event *ev, eb_EventBus *bus, void *ctx);
 
-/// Subscribing during dispatch does not affect the event in flight. It fails if
-/// the type is at capacity, even when it holds slots freed earlier in the same
-/// dispatch (those are reclaimed only after the outermost dispatch returns).
+/// Subscribing during dispatch does not affect the event in flight. There is no
+/// cap on subscribers: the per-type list grows on demand. Fails on an invalid
+/// type, an already registered (handler, ctx) pair, or allocation failure.
 [[nodiscard]]
 bool eb_subscribe(eb_EventBus *bus, eb_EventType type, eb_EventHandler handler, void *ctx);
 

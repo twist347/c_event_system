@@ -85,6 +85,24 @@ static void h_relay(const eb_Event *ev, eb_EventBus *bus, void *ctx) {
     CHECK(eb_publish(bus, EV_Y));
 }
 
+static int calls;
+
+static void h_count(const eb_Event *ev, eb_EventBus *bus, void *ctx) {
+    UNUSED(ev);
+    UNUSED(bus);
+    UNUSED(ctx);
+    ++calls;
+}
+
+// subscribes from inside a dispatch; called with the vector exactly full, so the
+// append reallocs and moves the array the loop above is still walking
+static void h_grow(const eb_Event *ev, eb_EventBus *bus, void *ctx) {
+    UNUSED(ev);
+    UNUSED(ctx);
+    trace_put('g');
+    CHECK(eb_subscribe(bus, EV_X, h_count, nullptr));
+}
+
 /* ========== tests ========== */
 
 static void test_empty_bus() {
@@ -197,15 +215,149 @@ static void test_nested_publish() {
     eb_bus_destroy(bus);
 }
 
-static void test_capacity() {
-    eb_EventBus *bus = eb_bus_create(EV_COUNT);
-    int slots[EB_MAX_HANDLERS_PER_TYPE + 1] = {0};
+// well past every doubling step, so the vector reallocs several times
+static void test_growth() {
+    constexpr size_t n = 200;
 
-    for (size_t i = 0; i < EB_MAX_HANDLERS_PER_TYPE; ++i) {
-        CHECK(eb_subscribe(bus, EV_X, h_a, &slots[i]));
+    eb_EventBus *bus = eb_bus_create(EV_COUNT);
+    int slots[n];
+
+    bool all_ok = true;
+    for (size_t i = 0; i < n; ++i) {
+        slots[i] = 0;
+        if (!eb_subscribe(bus, EV_X, h_count, &slots[i])) {
+            all_ok = false;
+        }
     }
-    CHECK(!eb_subscribe(bus, EV_X, h_a, &slots[EB_MAX_HANDLERS_PER_TYPE]));
-    CHECK(eb_count_subscribers(bus, EV_X) == EB_MAX_HANDLERS_PER_TYPE);
+    CHECK(all_ok);
+    CHECK(eb_count_subscribers(bus, EV_X) == n);
+    CHECK(!eb_subscribe(bus, EV_X, h_count, &slots[0])); // duplicate, after growth
+
+    calls = 0;
+    CHECK(eb_publish(bus, EV_X));
+    CHECK(calls == n);
+
+    // compaction reclaims every slot but keeps the capacity, so the vector stays
+    // usable and the next subscribe needs no realloc
+    eb_unsubscribe_by_type(bus, EV_X);
+    CHECK(eb_count_subscribers(bus, EV_X) == 0);
+    CHECK(eb_subscribe(bus, EV_X, h_count, &slots[0]));
+
+    calls = 0;
+    CHECK(eb_publish(bus, EV_X));
+    CHECK(calls == 1);
+
+    eb_bus_destroy(bus);
+}
+
+// the realloc hazard: growing from inside a handler must not disturb the
+// dispatch already walking the array
+static void test_grow_during_dispatch() {
+    eb_EventBus *bus = eb_bus_create(EV_COUNT);
+    int slots[3] = {0};
+    trace_reset();
+
+    // fill the first capacity step (4) exactly: h_grow then three more
+    CHECK(eb_subscribe(bus, EV_X, h_grow, nullptr));
+    CHECK(eb_subscribe(bus, EV_X, h_a, &slots[0]));
+    CHECK(eb_subscribe(bus, EV_X, h_a, &slots[1]));
+    CHECK(eb_subscribe(bus, EV_X, h_a, &slots[2]));
+
+    calls = 0;
+    CHECK(eb_publish(bus, EV_X));
+    CHECK(strcmp(trace, "gaaa") == 0); // the rest of the loop survived the move
+    CHECK(calls == 0);                 // the new handler stayed out of this event
+    CHECK(eb_count_subscribers(bus, EV_X) == 5);
+
+    // it takes part in the next one
+    CHECK(eb_unsubscribe(bus, EV_X, h_grow, nullptr));
+    trace_reset();
+    calls = 0;
+    CHECK(eb_publish(bus, EV_X));
+    CHECK(strcmp(trace, "aaa") == 0);
+    CHECK(calls == 1);
+
+    eb_bus_destroy(bus);
+}
+
+static void test_reserve() {
+    constexpr size_t n = 50;
+
+    eb_EventBus *bus = eb_bus_create(EV_COUNT);
+    int slots[n];
+
+    CHECK(!eb_bus_reserve(bus, EV_COUNT, n)); // invalid type
+    CHECK(!eb_bus_reserve(bus, -1, n));
+    CHECK(!eb_bus_reserve(bus, EV_X, SIZE_MAX)); // byte count would overflow
+
+    CHECK(eb_bus_reserve(bus, EV_X, n));
+    CHECK(eb_bus_reserve(bus, EV_X, 1));         // below capacity: a no-op, not a failure
+    CHECK(eb_count_subscribers(bus, EV_X) == 0); // reserving registers nobody
+
+    bool all_ok = true;
+    for (size_t i = 0; i < n; ++i) {
+        slots[i] = 0;
+        if (!eb_subscribe(bus, EV_X, h_count, &slots[i])) {
+            all_ok = false;
+        }
+    }
+    CHECK(all_ok);
+    CHECK(eb_count_subscribers(bus, EV_X) == n);
+
+    calls = 0;
+    CHECK(eb_publish(bus, EV_X));
+    CHECK(calls == n);
+
+    eb_bus_destroy(bus);
+}
+
+static void test_shrink() {
+    constexpr size_t n = 100;
+
+    eb_EventBus *bus = eb_bus_create(EV_COUNT);
+    int slots[n];
+
+    bool all_ok = true;
+    for (size_t i = 0; i < n; ++i) {
+        slots[i] = 0;
+        if (!eb_subscribe(bus, EV_X, h_count, &slots[i])) {
+            all_ok = false;
+        }
+    }
+    CHECK(all_ok);
+
+    bool all_gone = true;
+    for (size_t i = 3; i < n; ++i) {
+        if (!eb_unsubscribe(bus, EV_X, h_count, &slots[i])) {
+            all_gone = false;
+        }
+    }
+    CHECK(all_gone);
+    CHECK(eb_count_subscribers(bus, EV_X) == 3);
+
+    eb_bus_shrink_to_fit(bus);
+    CHECK(eb_count_subscribers(bus, EV_X) == 3); // subscriptions are untouched
+
+    calls = 0;
+    CHECK(eb_publish(bus, EV_X));
+    CHECK(calls == 3);
+
+    CHECK(eb_subscribe(bus, EV_X, h_count, &slots[10])); // still growable
+    CHECK(eb_count_subscribers(bus, EV_X) == 4);
+
+    // a type with nothing live frees its storage outright, and shrinking an
+    // already tight bus twice changes nothing
+    eb_unsubscribe_by_type(bus, EV_X);
+    eb_bus_shrink_to_fit(bus);
+    eb_bus_shrink_to_fit(bus);
+    CHECK(eb_count_subscribers(bus, EV_X) == 0);
+    CHECK(eb_publish(bus, EV_X)); // publishing on emptied storage is fine
+
+    CHECK(eb_subscribe(bus, EV_X, h_count, &slots[0])); // and it regrows
+    CHECK(eb_count_subscribers(bus, EV_X) == 1);
+    calls = 0;
+    CHECK(eb_publish(bus, EV_X));
+    CHECK(calls == 1);
 
     eb_bus_destroy(bus);
 }
@@ -236,7 +388,10 @@ int main() {
     test_unsubscribe_during_dispatch();
     test_unsubscribe_by_ctx();
     test_nested_publish();
-    test_capacity();
+    test_growth();
+    test_grow_during_dispatch();
+    test_reserve();
+    test_shrink();
     test_reset();
 
     printf("%d checks, %d failed\n", checks_run, checks_failed);

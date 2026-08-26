@@ -10,6 +10,8 @@ FIFO delivery, safe subscribe/unsubscribe even from inside handlers.
 - **FIFO order**: handlers are invoked in registration order.
 - **Mutation-safe dispatch**: unsubscribing inside a handler takes effect immediately; subscribing never feeds the event in flight.
 - **Zero-copy payloads**: pass a pointer + size; no allocations in the hot path.
+- **No subscriber cap**: the per-type list grows on demand, with `eb_bus_reserve`
+  to pre-allocate and `eb_bus_shrink_to_fit` to hand memory back.
 - **C++ friendly**: functions are `extern "C"`.
 - **No deps** beyond the standard library.
 
@@ -17,10 +19,9 @@ FIFO delivery, safe subscribe/unsubscribe even from inside handlers.
 - **Unsubscribe is immediate, so the result depends on registration order.**
   A handler removed during a publish is skipped, unless the dispatch had already
   reached it. Freeing that handler's `ctx` on the spot is safe.
-- **Capped at `EB_MAX_HANDLERS_PER_TYPE` (32) handlers per event type.**
-  `eb_subscribe` returns `false` once a type is full.
-- **Subscribe can fail during a publish** if the type is at capacity: slots
-  freed earlier in the same dispatch are reclaimed only after it returns.
+- **Subscribe allocates**, so it returns `false` if the subscriber list cannot
+  grow. Growing from inside a handler is safe: the dispatch in flight follows
+  the moved array.
 - **Single-threaded.** No internal locking — call from one thread only.
 - **Bounded recursion.** Nested publishes are capped at
   `EB_MAX_DISPATCH_DEPTH` levels (default 32). Hitting the cap drops
@@ -28,7 +29,17 @@ FIFO delivery, safe subscribe/unsubscribe even from inside handlers.
 
 ## Complexity & memory
 - `subscribe` / `unsubscribe` / `publish`: **O(n)** in handlers per type.
-- Storage is preallocated: `event_type_count × EB_MAX_HANDLERS_PER_TYPE` slots — fixed cost, no reallocs.
+- `subscribe` is amortized O(1) past the duplicate check: capacity doubles from 4.
+- A bus costs `event_type_count` empty vectors up front; slots are allocated per
+  type on first subscribe. Vectors never shrink — compaction and `eb_bus_reset`
+  reclaim slots but keep the capacity.
+- Dead slots are swept only once the outermost dispatch returns, so heavy
+  subscribe/unsubscribe churn *inside* a single dispatch grows a vector by the
+  churn rather than by the live count. `eb_bus_shrink_to_fit` is the way back.
+- `eb_bus_reserve(bus, type, n)` up front makes the following `n` subscribes
+  allocation-free, which is what you want if the bus must not allocate after
+  init. It is not a speed knob — doubling already costs ~6 reallocs to reach 100
+  subscribers, all of them at startup.
 
 ## Usage
 
