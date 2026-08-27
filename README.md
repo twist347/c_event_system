@@ -141,6 +141,66 @@ Sizing the queue for the bus instead of taking the defaults:
 > Never wrap the calls themselves in `assert()`: under `-DNDEBUG` the argument
 > isn't evaluated and nothing runs. Assign, then assert (as above).
 
+## API
+
+`eb_EventType` is an `int32_t`, `eb_Event` and `eb_EventBus` are opaque, and a
+handler is an `eb_EventHandler`, i.e.
+`void (*)(const eb_Event *ev, eb_EventBus *bus, void *ctx)`.
+
+**Event**
+
+| | |
+|---|---|
+| `eb_ev_type(ev)` | the type it was published with |
+| `eb_ev_data(ev)` / `eb_ev_data_size(ev)` | payload, borrowed for the call |
+| `EB_EV_EXPECT(ev, T)` | assert it really is a `T` |
+| `EB_EV_VAL(ev, T)` / `EB_EV_CPTR(ev, T)` | read it in place |
+| `EB_EV_LOAD(ev, T, dst)` | copy it out — the only form that outlives dispatch |
+
+**Bus**
+
+| | |
+|---|---|
+| `eb_bus_create(n)` | types `[0, n)`, default queue |
+| `eb_bus_create_ex(n, slot, cap)` | same, queue sized here |
+| `eb_bus_destroy(bus)` | frees it; safe on `nullptr` |
+| `eb_bus_reset(bus)` | drops subscriptions and queue, keeps the memory |
+| `eb_bus_reserve(bus, type, n)` | room for `n` subscribers up front |
+| `eb_bus_shrink_to_fit(bus)` | hand unused subscriber capacity back |
+
+**Subscriptions**
+
+| | |
+|---|---|
+| `eb_subscribe(bus, type, h, ctx)` | register; duplicate pairs rejected |
+| `eb_unsubscribe(bus, type, h, ctx)` | remove one |
+| `eb_unsubscribe_by_type(bus, type)` | remove all on a type |
+| `eb_unsubscribe_by_ctx(bus, ctx)` | remove by ctx, returns how many |
+| `eb_unsubscribe_by_handler(bus, h)` | remove by handler, returns how many |
+| `eb_count_subscribers(bus, type)` | live handlers on a type |
+| `EB_CTX_EXPECT/VAL/PTR/CPTR(ctx, T)` | the `EB_EV_` macros, for `ctx` |
+
+**Publish — now**
+
+| | |
+|---|---|
+| `eb_publish_data(bus, type, data, size)` | run every handler; payload borrowed |
+| `eb_publish(bus, type)` | same, no payload |
+| `EB_PUBLISH(bus, type, expr)` | publish a copy of `expr` |
+| `EB_MAX_DISPATCH_DEPTH` | nesting cap, 32 |
+
+**Publish — later**
+
+| | |
+|---|---|
+| `eb_post_data(bus, type, data, size)` | queue it; payload **copied** |
+| `eb_post(bus, type)` | same, no payload |
+| `EB_POST(bus, type, expr)` | post a copy of `expr` |
+| `eb_drain(bus)` | dispatch what is queued, returns how many |
+| `eb_drop_posted(bus)` | discard the queue |
+| `eb_count_posted(bus)` | events waiting |
+| `EB_DEFAULT_POST_PAYLOAD` / `EB_DEFAULT_POST_QUEUE_CAP` | 64 B, 256 slots |
+
 ## Requirements
 
 GCC or Clang with **C23** support (tested on Linux; macOS and the BSDs should
