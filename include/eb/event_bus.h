@@ -81,7 +81,8 @@ eb_EventBus *eb_bus_create_ex(size_t event_type_count, size_t post_slot_size, si
 /// Safe on nullptr.
 void eb_bus_destroy(eb_EventBus *bus);
 
-/// Drops every subscription, keeps the allocation.
+/// Drops every subscription and every event still queued, keeping both
+/// allocations. Not callable during a dispatch.
 void eb_bus_reset(eb_EventBus *bus);
 
 /// Pre-allocates room for `n` subscribers on `type`, so eb_subscribe cannot fail
@@ -176,6 +177,9 @@ do {                                                                  \
 /// A payload above this bus's post slot size returns false too, and asserts:
 /// its size is fixed by the call site, so going over is a bug, not a run-time
 /// condition.
+/// A queue slot is aligned for max_align_t and no further, so a type needing
+/// stricter alignment cannot be posted -- eb_publish_data still takes it, since
+/// it borrows the caller's own object instead of copying into a slot.
 [[nodiscard]]
 bool eb_post_data(eb_EventBus *bus, eb_EventType type, const void *data, size_t data_size);
 
@@ -200,10 +204,12 @@ size_t eb_count_posted(const eb_EventBus *bus);
 /// Posts a copy of the expression as the payload, discarding the result. A full
 /// queue is an ordinary run-time state, unlike anything that fails a publish, so
 /// this drops events silently -- call eb_post_data directly where that matters.
-#define EB_POST(bus, type, ...)                                    \
-do {                                                               \
-    EB_UNQUAL_(__VA_ARGS__) eb_tmp_ = (__VA_ARGS__);               \
-    (void) eb_post_data((bus), (type), &eb_tmp_, sizeof(eb_tmp_)); \
+#define EB_POST(bus, type, ...)                                             \
+do {                                                                        \
+    static_assert(alignof(EB_UNQUAL_(__VA_ARGS__)) <= alignof(max_align_t), \
+                  "EB_POST: payload needs more alignment than a slot has"); \
+    EB_UNQUAL_(__VA_ARGS__) eb_tmp_ = (__VA_ARGS__);                        \
+    (void) eb_post_data((bus), (type), &eb_tmp_, sizeof(eb_tmp_));          \
 } while (0)
 
 #ifdef __cplusplus

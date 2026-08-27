@@ -37,6 +37,11 @@ optional deferred queue for work that must wait until the frame settles.
   slot size (`EB_DEFAULT_POST_PAYLOAD`, 64 bytes, unless `eb_bus_create_ex` says
   otherwise) — going over drops the event and asserts in debug builds. This is
   the one asymmetry between the two paths.
+- **A queue slot is aligned for `max_align_t`, no further.** A type needing
+  stricter alignment (SIMD vectors, cache-line-padded structs) cannot go through
+  `post`; `EB_POST` refuses to compile, and `eb_post_data` has no way to notice.
+  `publish` carries such a payload fine — it borrows your object rather than
+  copying into a slot.
 - **`drain` handles the events queued as of entry**, never more. A post made
   from a handler waits for the next drain, so two handlers posting to each other
   cannot keep a drain alive. `drain` is not callable from any handler, and
