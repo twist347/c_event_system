@@ -1,6 +1,7 @@
 #pragma once
 
 // Synchronous event bus: publish runs every handler before it returns.
+// Posting queues an event instead, to be dispatched by a later drain.
 // Single-threaded.
 
 #include <stddef.h>
@@ -14,7 +15,6 @@
 
 #ifdef __cplusplus
 extern "C" {
-
 #endif
 
 /* ========== event ========== */
@@ -36,13 +36,13 @@ const void *eb_ev_data(const eb_Event *ev);
 size_t eb_ev_data_size(const eb_Event *ev);
 
 /// Asserts the payload really is a T. Compiled out under NDEBUG.
-#define EB_EV_EXPECT(ev, T)                                                 \
-do {                                                                        \
-    [[maybe_unused]] const eb_Event *eb_ev_ = (ev);                         \
-    assert(eb_ev_);                                                         \
-    assert(eb_ev_data(eb_ev_));                                             \
-    assert(((uintptr_t) eb_ev_data(eb_ev_) % (uintptr_t) alignof(T)) == 0); \
-    assert(eb_ev_data_size(eb_ev_) == sizeof(T));                           \
+#define EB_EV_EXPECT(ev, T)                                                   \
+do {                                                                          \
+    [[maybe_unused]] const eb_Event *eb_exp_ = (ev);                          \
+    assert(eb_exp_);                                                          \
+    assert(eb_ev_data(eb_exp_));                                              \
+    assert(((uintptr_t) eb_ev_data(eb_exp_) % (uintptr_t) alignof(T)) == 0);  \
+    assert(eb_ev_data_size(eb_exp_) == sizeof(T));                            \
 } while (0)
 
 /// Read the payload in place. Run EB_EV_EXPECT first.
@@ -152,6 +152,46 @@ bool eb_publish(eb_EventBus *bus, eb_EventType type);
 do {                                                                  \
     EB_UNQUAL_(__VA_ARGS__) eb_tmp_ = (__VA_ARGS__);                  \
     (void) eb_publish_data((bus), (type), &eb_tmp_, sizeof(eb_tmp_)); \
+} while (0)
+
+/* ========== event bus deferred publish ========== */
+
+/// Largest payload a posted event may carry.
+constexpr size_t EB_MAX_POST_PAYLOAD = 64;
+
+/// Events that can wait for a drain at once. The queue is allocated on the
+/// first post, so a bus that never posts never pays for it.
+constexpr size_t EB_POST_QUEUE_CAP = 256;
+
+/// Queues the event instead of dispatching it: no handler runs until eb_drain.
+/// Unlike eb_publish_data the payload is COPIED, so it need not outlive the
+/// call. Returns false on an invalid type, a payload above EB_MAX_POST_PAYLOAD,
+/// a full queue, or allocation failure.
+[[nodiscard]]
+bool eb_post_data(eb_EventBus *bus, eb_EventType type, const void *data, size_t data_size);
+
+/// Posts with no payload.
+[[nodiscard]]
+bool eb_post(eb_EventBus *bus, eb_EventType type);
+
+/// Dispatches the events queued as of entry and returns how many it dispatched.
+/// A post made from a handler waits for the next drain, so this cannot spin.
+/// While it runs one slot is held by the event in flight, and eb_drain itself
+/// is not callable from a handler: it returns 0.
+size_t eb_drain(eb_EventBus *bus);
+
+/// Discards every queued event, dispatching none. Does nothing during a drain.
+void eb_drop_posted(eb_EventBus *bus);
+
+/// Events waiting for a drain.
+[[nodiscard]]
+size_t eb_count_posted(const eb_EventBus *bus);
+
+/// Posts a copy of the expression as the payload, discarding the result.
+#define EB_POST(bus, type, ...)                                    \
+do {                                                               \
+    EB_UNQUAL_(__VA_ARGS__) eb_tmp_ = (__VA_ARGS__);               \
+    (void) eb_post_data((bus), (type), &eb_tmp_, sizeof(eb_tmp_)); \
 } while (0)
 
 #ifdef __cplusplus

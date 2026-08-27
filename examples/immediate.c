@@ -1,3 +1,10 @@
+// Immediate delivery: eb_publish runs every handler before it returns.
+//
+// The goblin dies inside the damage dispatch and frees itself on the spot, so
+// on_damage_report -- registered after the handler that killed it -- never sees
+// the fatal hit. That missing "goblin is at 0 hp" line is the tombstone model
+// working: a subscription removed mid-dispatch is skipped, not left dangling.
+
 #include "eb/event_bus.h"
 
 #include <assert.h>
@@ -55,7 +62,7 @@ static void on_died(const eb_Event *ev, eb_EventBus *bus, void *ctx) {
     printf("  %s died\n", self->name);
 
     const size_t dropped = eb_unsubscribe_by_ctx(bus, self);
-    printf("  dropped %zu subscriptions\n", dropped);
+    printf("  dropped %zu coins\n", dropped);
 
     free(self);
 }

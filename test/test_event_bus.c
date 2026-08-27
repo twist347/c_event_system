@@ -103,6 +103,63 @@ static void h_grow(const eb_Event *ev, eb_EventBus *bus, void *ctx) {
     CHECK(eb_subscribe(bus, EV_X, h_count, nullptr));
 }
 
+typedef struct {
+    int a;
+    int b;
+} Pair;
+
+static Pair pair_seen;
+
+static void h_pair(const eb_Event *ev, eb_EventBus *bus, void *ctx) {
+    UNUSED(bus);
+    UNUSED(ctx);
+    EB_EV_EXPECT(ev, Pair); // also checks the queue slot is aligned for Pair
+    EB_EV_LOAD(ev, Pair, pair_seen);
+}
+
+// the two below post to each other: without a snapshot a drain would never end
+static void h_ping(const eb_Event *ev, eb_EventBus *bus, void *ctx) {
+    UNUSED(ev);
+    UNUSED(ctx);
+    trace_put('p');
+    CHECK(eb_post(bus, EV_Y));
+}
+
+static void h_pong(const eb_Event *ev, eb_EventBus *bus, void *ctx) {
+    UNUSED(ev);
+    UNUSED(ctx);
+    trace_put('q');
+    CHECK(eb_post(bus, EV_X));
+}
+
+// posts from inside a drain of a full queue, then rereads its own payload: the
+// post must be refused, because the slot it would take is the one in flight
+static bool probe_ran;
+static bool probe_post_ok;
+static bool probe_payload_kept;
+
+static void h_post_probe(const eb_Event *ev, eb_EventBus *bus, void *ctx) {
+    UNUSED(ctx);
+    if (probe_ran) {
+        return;
+    }
+    probe_ran = true;
+
+    // a payload of its own, so a slot reused here would visibly rewrite ours
+    const int before = EB_EV_VAL(ev, int);
+    const int mine = -12345;
+    probe_post_ok = eb_post_data(bus, EV_Y, &mine, sizeof(mine));
+    probe_payload_kept = EB_EV_VAL(ev, int) == before;
+}
+
+// publishes synchronously from inside a drain
+static void h_relay_sync(const eb_Event *ev, eb_EventBus *bus, void *ctx) {
+    UNUSED(ev);
+    UNUSED(ctx);
+    trace_put('r');
+    CHECK(eb_publish(bus, EV_Y));
+}
+
 /* ========== tests ========== */
 
 static void test_empty_bus() {
@@ -266,7 +323,7 @@ static void test_grow_during_dispatch() {
     calls = 0;
     CHECK(eb_publish(bus, EV_X));
     CHECK(strcmp(trace, "gaaa") == 0); // the rest of the loop survived the move
-    CHECK(calls == 0);                 // the new handler stayed out of this event
+    CHECK(calls == 0); // the new handler stayed out of this event
     CHECK(eb_count_subscribers(bus, EV_X) == 5);
 
     // it takes part in the next one
@@ -291,7 +348,7 @@ static void test_reserve() {
     CHECK(!eb_bus_reserve(bus, EV_X, SIZE_MAX)); // byte count would overflow
 
     CHECK(eb_bus_reserve(bus, EV_X, n));
-    CHECK(eb_bus_reserve(bus, EV_X, 1));         // below capacity: a no-op, not a failure
+    CHECK(eb_bus_reserve(bus, EV_X, 1)); // below capacity: a no-op, not a failure
     CHECK(eb_count_subscribers(bus, EV_X) == 0); // reserving registers nobody
 
     bool all_ok = true;
@@ -379,6 +436,228 @@ static void test_reset() {
     eb_bus_destroy(bus);
 }
 
+static void test_post_defers() {
+    eb_EventBus *bus = eb_bus_create(EV_COUNT);
+    trace_reset();
+
+    CHECK(eb_subscribe(bus, EV_X, h_a, nullptr));
+
+    CHECK(eb_post(bus, EV_X));
+    CHECK(strcmp(trace, "") == 0); // nothing runs at post time
+    CHECK(eb_count_posted(bus) == 1);
+
+    CHECK(eb_drain(bus) == 1);
+    CHECK(strcmp(trace, "a") == 0);
+    CHECK(eb_count_posted(bus) == 0);
+    CHECK(eb_drain(bus) == 0); // an empty drain is not a failure
+
+    // an event nobody listens to still counts as dispatched
+    CHECK(eb_post(bus, EV_Y));
+    CHECK(eb_drain(bus) == 1);
+
+    CHECK(!eb_post(bus, EV_COUNT)); // out of range
+    CHECK(!eb_post(bus, -1));
+    CHECK(eb_count_posted(bus) == 0);
+
+    eb_bus_destroy(bus);
+}
+
+// the asymmetry against eb_publish_data: a post copies, so the source may die
+static void test_post_copies_payload() {
+    eb_EventBus *bus = eb_bus_create(EV_COUNT);
+    pair_seen = (Pair){};
+
+    CHECK(eb_subscribe(bus, EV_X, h_pair, nullptr));
+
+    Pair p = {.a = 1, .b = 2};
+    EB_POST(bus, EV_X, p);
+    p = (Pair){.a = 99, .b = 99}; // the posted copy must not follow
+
+    CHECK(eb_drain(bus) == 1);
+    CHECK(pair_seen.a == 1 && pair_seen.b == 2);
+
+    eb_bus_destroy(bus);
+}
+
+static void test_post_fifo_order() {
+    eb_EventBus *bus = eb_bus_create(EV_COUNT);
+    trace_reset();
+
+    CHECK(eb_subscribe(bus, EV_X, h_a, nullptr));
+    CHECK(eb_subscribe(bus, EV_Y, h_b, nullptr));
+
+    CHECK(eb_post(bus, EV_X));
+    CHECK(eb_post(bus, EV_Y));
+    CHECK(eb_post(bus, EV_X));
+
+    CHECK(eb_drain(bus) == 3);
+    CHECK(strcmp(trace, "aba") == 0); // queue order, not type order
+
+    eb_bus_destroy(bus);
+}
+
+// a drain handles the events queued as of entry and no more
+static void test_drain_snapshot() {
+    eb_EventBus *bus = eb_bus_create(EV_COUNT);
+    trace_reset();
+
+    CHECK(eb_subscribe(bus, EV_X, h_ping, nullptr));
+    CHECK(eb_subscribe(bus, EV_Y, h_pong, nullptr));
+
+    CHECK(eb_post(bus, EV_X));
+
+    // each round would be an infinite loop if the drain ran to exhaustion
+    CHECK(eb_drain(bus) == 1);
+    CHECK(strcmp(trace, "p") == 0);
+    CHECK(eb_count_posted(bus) == 1); // h_ping's post waits for the next drain
+
+    CHECK(eb_drain(bus) == 1);
+    CHECK(strcmp(trace, "pq") == 0);
+    CHECK(eb_count_posted(bus) == 1);
+
+    CHECK(eb_drain(bus) == 1);
+    CHECK(strcmp(trace, "pqp") == 0);
+
+    eb_drop_posted(bus);
+    eb_bus_destroy(bus);
+}
+
+static void test_post_queue_full() {
+    eb_EventBus *bus = eb_bus_create(EV_COUNT);
+
+    bool all_ok = true;
+    for (size_t i = 0; i < EB_POST_QUEUE_CAP; ++i) {
+        if (!eb_post(bus, EV_X)) {
+            all_ok = false;
+        }
+    }
+    CHECK(all_ok);
+    CHECK(eb_count_posted(bus) == EB_POST_QUEUE_CAP);
+
+    CHECK(!eb_post(bus, EV_X)); // the cap is hard
+    CHECK(eb_count_posted(bus) == EB_POST_QUEUE_CAP);
+
+    CHECK(eb_drain(bus) == EB_POST_QUEUE_CAP);
+    CHECK(eb_count_posted(bus) == 0);
+    CHECK(eb_post(bus, EV_X)); // and the room comes back
+
+    eb_drop_posted(bus);
+    eb_bus_destroy(bus);
+}
+
+// enough rounds to carry head past the end of the ring several times
+static void test_post_ring_wraps() {
+    constexpr size_t chunk = 200;
+
+    eb_EventBus *bus = eb_bus_create(EV_COUNT);
+    calls = 0;
+    CHECK(eb_subscribe(bus, EV_X, h_count, nullptr));
+
+    bool all_ok = true;
+    for (size_t round = 0; round < 5; ++round) {
+        for (size_t i = 0; i < chunk; ++i) {
+            if (!eb_post(bus, EV_X)) {
+                all_ok = false;
+            }
+        }
+        if (eb_drain(bus) != chunk) {
+            all_ok = false;
+        }
+    }
+    CHECK(all_ok);
+    CHECK(calls == 5 * (int) chunk);
+    CHECK(eb_count_posted(bus) == 0);
+
+    eb_bus_destroy(bus);
+}
+
+// the slot being dispatched stays owned until the handler returns, so a post
+// from inside the drain cannot land on it and rewrite the payload in flight
+static void test_slot_held_during_dispatch() {
+    eb_EventBus *bus = eb_bus_create(EV_COUNT);
+    probe_ran = false;
+    probe_post_ok = true;
+    probe_payload_kept = false;
+
+    CHECK(eb_subscribe(bus, EV_X, h_post_probe, nullptr));
+
+    bool all_ok = true;
+    for (size_t i = 0; i < EB_POST_QUEUE_CAP; ++i) {
+        const int payload = (int) i;
+        if (!eb_post_data(bus, EV_X, &payload, sizeof(payload))) {
+            all_ok = false;
+        }
+    }
+    CHECK(all_ok);
+
+    CHECK(eb_drain(bus) == EB_POST_QUEUE_CAP);
+    CHECK(probe_ran);
+    CHECK(!probe_post_ok); // refused: the only free slot is the one in flight
+    CHECK(probe_payload_kept);
+
+    eb_bus_destroy(bus);
+}
+
+// a drained event dispatches like any other, nesting included
+static void test_publish_from_drain() {
+    eb_EventBus *bus = eb_bus_create(EV_COUNT);
+    trace_reset();
+
+    CHECK(eb_subscribe(bus, EV_X, h_relay_sync, nullptr));
+    CHECK(eb_subscribe(bus, EV_Y, h_b, nullptr));
+
+    CHECK(eb_post(bus, EV_X));
+    CHECK(eb_drain(bus) == 1);
+    CHECK(strcmp(trace, "rb") == 0); // the sync publish ran inside the drain
+
+    eb_bus_destroy(bus);
+}
+
+static void test_drop_posted() {
+    eb_EventBus *bus = eb_bus_create(EV_COUNT);
+    trace_reset();
+
+    CHECK(eb_subscribe(bus, EV_X, h_a, nullptr));
+    CHECK(eb_post(bus, EV_X));
+    CHECK(eb_post(bus, EV_X));
+
+    eb_drop_posted(bus);
+    CHECK(eb_count_posted(bus) == 0);
+    CHECK(eb_drain(bus) == 0);
+    CHECK(strcmp(trace, "") == 0);
+
+    eb_drop_posted(bus); // dropping an empty queue changes nothing
+    CHECK(eb_count_posted(bus) == 0);
+
+    eb_bus_destroy(bus);
+}
+
+static void test_reset_clears_queue() {
+    eb_EventBus *bus = eb_bus_create(EV_COUNT);
+    trace_reset();
+
+    CHECK(eb_subscribe(bus, EV_X, h_a, nullptr));
+    CHECK(eb_post(bus, EV_X));
+
+    eb_bus_reset(bus);
+    CHECK(eb_count_posted(bus) == 0);
+    CHECK(eb_drain(bus) == 0);
+    CHECK(strcmp(trace, "") == 0);
+
+    eb_bus_destroy(bus);
+}
+
+// a bus torn down with events still queued owns no payload pointers to leak
+static void test_destroy_with_queued() {
+    eb_EventBus *bus = eb_bus_create(EV_COUNT);
+
+    const Pair p = {.a = 7, .b = 8};
+    CHECK(eb_post_data(bus, EV_X, &p, sizeof(p)));
+    CHECK(eb_count_posted(bus) == 1);
+
+    eb_bus_destroy(bus);
+}
+
 int main() {
     test_empty_bus();
     test_subscribe_rules();
@@ -393,6 +672,17 @@ int main() {
     test_reserve();
     test_shrink();
     test_reset();
+    test_post_defers();
+    test_post_copies_payload();
+    test_post_fifo_order();
+    test_drain_snapshot();
+    test_post_queue_full();
+    test_post_ring_wraps();
+    test_slot_held_during_dispatch();
+    test_publish_from_drain();
+    test_drop_posted();
+    test_reset_clears_queue();
+    test_destroy_with_queued();
 
     printf("%d checks, %d failed\n", checks_run, checks_failed);
     return checks_failed != 0;

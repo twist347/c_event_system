@@ -1,9 +1,11 @@
-add_executable(example main.c)
-target_link_libraries(example PRIVATE eb::event_bus)
-target_compile_options(example PRIVATE -Wall -Wextra -Wpedantic)
+foreach (name IN ITEMS immediate deferred)
+    add_executable(example_${name} ${name}.c)
+    target_link_libraries(example_${name} PRIVATE eb::event_bus)
+    target_compile_options(example_${name} PRIVATE -Wall -Wextra -Wpedantic)
 
-set_target_properties(example PROPERTIES
-        C_STANDARD 23
-        C_STANDARD_REQUIRED ON
-        C_EXTENSIONS OFF
-)
+    set_target_properties(example_${name} PROPERTIES
+            C_STANDARD 23
+            C_STANDARD_REQUIRED ON
+            C_EXTENSIONS OFF
+    )
+endforeach ()
