@@ -61,9 +61,22 @@ do {                                               \
 
 typedef struct eb_EventBus eb_EventBus;
 
+/// Post queue sizes eb_bus_create picks; eb_bus_create_ex takes its own.
+constexpr size_t EB_DEFAULT_POST_PAYLOAD = 64;
+constexpr size_t EB_DEFAULT_POST_QUEUE_CAP = 256;
+
 /// Valid event types are [0, event_type_count). nullptr on allocation failure.
 [[nodiscard]]
 eb_EventBus *eb_bus_create(size_t event_type_count);
+
+/// Same, with the post queue sized for this bus instead of taking the defaults:
+/// `post_slot_size` is the largest payload eb_post_data will accept -- 0 allows
+/// payload-less posts only and costs no payload storage -- and `post_queue_cap`
+/// is how many events may wait for a drain. Neither is allocated until the
+/// first post. nullptr on allocation failure, or on sizes whose product does
+/// not fit in size_t.
+[[nodiscard]]
+eb_EventBus *eb_bus_create_ex(size_t event_type_count, size_t post_slot_size, size_t post_queue_cap);
 
 /// Safe on nullptr.
 void eb_bus_destroy(eb_EventBus *bus);
@@ -156,17 +169,13 @@ do {                                                                  \
 
 /* ========== event bus deferred publish ========== */
 
-/// Largest payload a posted event may carry.
-constexpr size_t EB_MAX_POST_PAYLOAD = 64;
-
-/// Events that can wait for a drain at once. The queue is allocated on the
-/// first post, so a bus that never posts never pays for it.
-constexpr size_t EB_POST_QUEUE_CAP = 256;
-
-/// Queues the event instead of dispatching it: no handler runs until eb_drain.
+/// Queues the event instead of dispatching it: no handler runs until eb_drain,
+/// and the subscriber list is read then, not now.
 /// Unlike eb_publish_data the payload is COPIED, so it need not outlive the
-/// call. Returns false on an invalid type, a payload above EB_MAX_POST_PAYLOAD,
-/// a full queue, or allocation failure.
+/// call. Returns false on an invalid type, a full queue, or allocation failure.
+/// A payload above this bus's post slot size returns false too, and asserts:
+/// its size is fixed by the call site, so going over is a bug, not a run-time
+/// condition.
 [[nodiscard]]
 bool eb_post_data(eb_EventBus *bus, eb_EventType type, const void *data, size_t data_size);
 
@@ -176,18 +185,21 @@ bool eb_post(eb_EventBus *bus, eb_EventType type);
 
 /// Dispatches the events queued as of entry and returns how many it dispatched.
 /// A post made from a handler waits for the next drain, so this cannot spin.
-/// While it runs one slot is held by the event in flight, and eb_drain itself
-/// is not callable from a handler: it returns 0.
+/// While it runs one slot is held by the event in flight. Not callable from a
+/// handler: asserts, and returns 0.
 size_t eb_drain(eb_EventBus *bus);
 
-/// Discards every queued event, dispatching none. Does nothing during a drain.
+/// Discards every queued event, dispatching none. Not callable during a drain:
+/// asserts, and leaves the queue alone.
 void eb_drop_posted(eb_EventBus *bus);
 
-/// Events waiting for a drain.
+/// Events waiting for a drain, plus the one in flight when called during one.
 [[nodiscard]]
 size_t eb_count_posted(const eb_EventBus *bus);
 
-/// Posts a copy of the expression as the payload, discarding the result.
+/// Posts a copy of the expression as the payload, discarding the result. A full
+/// queue is an ordinary run-time state, unlike anything that fails a publish, so
+/// this drops events silently -- call eb_post_data directly where that matters.
 #define EB_POST(bus, type, ...)                                    \
 do {                                                               \
     EB_UNQUAL_(__VA_ARGS__) eb_tmp_ = (__VA_ARGS__);               \

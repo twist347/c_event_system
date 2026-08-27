@@ -152,6 +152,40 @@ static void h_post_probe(const eb_Event *ev, eb_EventBus *bus, void *ctx) {
     probe_payload_kept = EB_EV_VAL(ev, int) == before;
 }
 
+// checks the drained payloads arrive in post order, values intact
+static int seq_next;
+static bool seq_ok;
+
+static void h_seq(const eb_Event *ev, eb_EventBus *bus, void *ctx) {
+    UNUSED(bus);
+    UNUSED(ctx);
+    EB_EV_EXPECT(ev, int);
+    if (EB_EV_VAL(ev, int) != seq_next) {
+        seq_ok = false;
+    }
+    ++seq_next;
+}
+
+static bool no_payload_ok;
+
+static void h_no_payload(const eb_Event *ev, eb_EventBus *bus, void *ctx) {
+    UNUSED(bus);
+    UNUSED(ctx);
+    no_payload_ok = eb_ev_data(ev) == nullptr && eb_ev_data_size(ev) == 0;
+}
+
+// a strictly-aligned payload, to catch a stride that is not rounded up
+static bool dbl_ok;
+
+static void h_dbl(const eb_Event *ev, eb_EventBus *bus, void *ctx) {
+    UNUSED(bus);
+    UNUSED(ctx);
+    EB_EV_EXPECT(ev, double); // asserts the slot is aligned for a double
+    if (EB_EV_VAL(ev, double) != 1.5) {
+        dbl_ok = false;
+    }
+}
+
 // publishes synchronously from inside a drain
 static void h_relay_sync(const eb_Event *ev, eb_EventBus *bus, void *ctx) {
     UNUSED(ev);
@@ -526,18 +560,18 @@ static void test_post_queue_full() {
     eb_EventBus *bus = eb_bus_create(EV_COUNT);
 
     bool all_ok = true;
-    for (size_t i = 0; i < EB_POST_QUEUE_CAP; ++i) {
+    for (size_t i = 0; i < EB_DEFAULT_POST_QUEUE_CAP; ++i) {
         if (!eb_post(bus, EV_X)) {
             all_ok = false;
         }
     }
     CHECK(all_ok);
-    CHECK(eb_count_posted(bus) == EB_POST_QUEUE_CAP);
+    CHECK(eb_count_posted(bus) == EB_DEFAULT_POST_QUEUE_CAP);
 
     CHECK(!eb_post(bus, EV_X)); // the cap is hard
-    CHECK(eb_count_posted(bus) == EB_POST_QUEUE_CAP);
+    CHECK(eb_count_posted(bus) == EB_DEFAULT_POST_QUEUE_CAP);
 
-    CHECK(eb_drain(bus) == EB_POST_QUEUE_CAP);
+    CHECK(eb_drain(bus) == EB_DEFAULT_POST_QUEUE_CAP);
     CHECK(eb_count_posted(bus) == 0);
     CHECK(eb_post(bus, EV_X)); // and the room comes back
 
@@ -545,28 +579,64 @@ static void test_post_queue_full() {
     eb_bus_destroy(bus);
 }
 
-// enough rounds to carry head past the end of the ring several times
+// enough rounds to carry head past the end of the ring several times, with a
+// distinct payload per event so a slot mixed up on the wrap would show
 static void test_post_ring_wraps() {
     constexpr size_t chunk = 200;
+    constexpr size_t rounds = 5;
 
     eb_EventBus *bus = eb_bus_create(EV_COUNT);
-    calls = 0;
-    CHECK(eb_subscribe(bus, EV_X, h_count, nullptr));
+    seq_next = 0;
+    seq_ok = true;
+    CHECK(eb_subscribe(bus, EV_X, h_seq, nullptr));
 
     bool all_ok = true;
-    for (size_t round = 0; round < 5; ++round) {
+    int posted = 0;
+    for (size_t round = 0; round < rounds; ++round) {
         for (size_t i = 0; i < chunk; ++i) {
-            if (!eb_post(bus, EV_X)) {
+            if (!eb_post_data(bus, EV_X, &posted, sizeof(posted))) {
                 all_ok = false;
             }
+            ++posted;
         }
         if (eb_drain(bus) != chunk) {
             all_ok = false;
         }
     }
     CHECK(all_ok);
-    CHECK(calls == 5 * (int) chunk);
+    CHECK(seq_ok); // every payload came back, in post order
+    CHECK(seq_next == (int) (rounds * chunk));
     CHECK(eb_count_posted(bus) == 0);
+
+    eb_bus_destroy(bus);
+}
+
+// a post carries the type and the payload, not the subscriber list: that is
+// read at drain time, so the roster may change in between
+static void test_subscribers_resolved_at_drain() {
+    eb_EventBus *bus = eb_bus_create(EV_COUNT);
+    trace_reset();
+
+    CHECK(eb_subscribe(bus, EV_X, h_a, nullptr));
+    CHECK(eb_post(bus, EV_X));
+
+    CHECK(eb_subscribe(bus, EV_X, h_b, nullptr)); // joined after the post
+    CHECK(eb_unsubscribe(bus, EV_X, h_a, nullptr)); // left after the post
+
+    CHECK(eb_drain(bus) == 1);
+    CHECK(strcmp(trace, "b") == 0);
+
+    eb_bus_destroy(bus);
+}
+
+static void test_post_without_payload() {
+    eb_EventBus *bus = eb_bus_create(EV_COUNT);
+    no_payload_ok = false;
+
+    CHECK(eb_subscribe(bus, EV_X, h_no_payload, nullptr));
+    CHECK(eb_post(bus, EV_X));
+    CHECK(eb_drain(bus) == 1);
+    CHECK(no_payload_ok); // data == nullptr and size == 0, as for eb_publish
 
     eb_bus_destroy(bus);
 }
@@ -582,7 +652,7 @@ static void test_slot_held_during_dispatch() {
     CHECK(eb_subscribe(bus, EV_X, h_post_probe, nullptr));
 
     bool all_ok = true;
-    for (size_t i = 0; i < EB_POST_QUEUE_CAP; ++i) {
+    for (size_t i = 0; i < EB_DEFAULT_POST_QUEUE_CAP; ++i) {
         const int payload = (int) i;
         if (!eb_post_data(bus, EV_X, &payload, sizeof(payload))) {
             all_ok = false;
@@ -590,7 +660,7 @@ static void test_slot_held_during_dispatch() {
     }
     CHECK(all_ok);
 
-    CHECK(eb_drain(bus) == EB_POST_QUEUE_CAP);
+    CHECK(eb_drain(bus) == EB_DEFAULT_POST_QUEUE_CAP);
     CHECK(probe_ran);
     CHECK(!probe_post_ok); // refused: the only free slot is the one in flight
     CHECK(probe_payload_kept);
@@ -658,6 +728,103 @@ static void test_destroy_with_queued() {
     eb_bus_destroy(bus);
 }
 
+// a bus sized for itself: small ring, small slot, everything still holds
+static void test_create_ex_sizes() {
+    constexpr size_t cap = 4;
+
+    eb_EventBus *bus = eb_bus_create_ex(EV_COUNT, sizeof(Pair), cap);
+    CHECK(bus);
+    pair_seen = (Pair){};
+    CHECK(eb_subscribe(bus, EV_X, h_pair, nullptr));
+
+    // a payload of exactly the slot size fits
+    const Pair p = {.a = 3, .b = 4};
+    CHECK(eb_post_data(bus, EV_X, &p, sizeof(p)));
+    CHECK(eb_drain(bus) == 1);
+    CHECK(pair_seen.a == 3 && pair_seen.b == 4);
+
+    // the custom cap is the one enforced, not the default
+    bool all_ok = true;
+    for (size_t i = 0; i < cap; ++i) {
+        if (!eb_post_data(bus, EV_X, &p, sizeof(p))) {
+            all_ok = false;
+        }
+    }
+    CHECK(all_ok);
+    CHECK(eb_count_posted(bus) == cap);
+    CHECK(!eb_post_data(bus, EV_X, &p, sizeof(p)));
+    CHECK(eb_drain(bus) == cap);
+
+    // and the ring wraps on the small cap just the same
+    all_ok = true;
+    for (size_t round = 0; round < 3; ++round) {
+        for (size_t i = 0; i < cap; ++i) {
+            if (!eb_post_data(bus, EV_X, &p, sizeof(p))) {
+                all_ok = false;
+            }
+        }
+        if (eb_drain(bus) != cap) {
+            all_ok = false;
+        }
+    }
+    CHECK(all_ok);
+
+    eb_bus_destroy(bus);
+}
+
+// slot_size 0: signals only, and no payload storage is ever allocated
+static void test_create_ex_no_payload() {
+    eb_EventBus *bus = eb_bus_create_ex(EV_COUNT, 0, 2);
+    CHECK(bus);
+    no_payload_ok = false;
+
+    CHECK(eb_subscribe(bus, EV_X, h_no_payload, nullptr));
+    CHECK(eb_post(bus, EV_X));
+    CHECK(eb_drain(bus) == 1);
+    CHECK(no_payload_ok);
+
+    eb_bus_destroy(bus);
+}
+
+// a slot size that is not a multiple of max_align_t: the stride has to be
+// rounded up, or every other slot lands misaligned for what it holds
+static void test_create_ex_odd_slot_size() {
+    constexpr size_t cap = 4;
+
+    eb_EventBus *bus = eb_bus_create_ex(EV_COUNT, sizeof(double) + 1, cap);
+    CHECK(bus);
+    dbl_ok = true;
+    CHECK(eb_subscribe(bus, EV_X, h_dbl, nullptr));
+
+    // two rounds, so the payload is read from every slot in the ring
+    bool all_ok = true;
+    for (size_t round = 0; round < 2; ++round) {
+        for (size_t i = 0; i < cap; ++i) {
+            const double d = 1.5;
+            if (!eb_post_data(bus, EV_X, &d, sizeof(d))) {
+                all_ok = false;
+            }
+        }
+        if (eb_drain(bus) != cap) {
+            all_ok = false;
+        }
+    }
+    CHECK(all_ok);
+    CHECK(dbl_ok);
+
+    eb_bus_destroy(bus);
+}
+
+// sizes whose product cannot be indexed are refused at creation, not at post
+static void test_create_ex_rejects_overflow() {
+    CHECK(!eb_bus_create_ex(EV_COUNT, SIZE_MAX, 2));
+    CHECK(!eb_bus_create_ex(EV_COUNT, 64, SIZE_MAX));
+    CHECK(!eb_bus_create_ex(EV_COUNT, SIZE_MAX / 2, 4));
+
+    eb_EventBus *bus = eb_bus_create_ex(EV_COUNT, 0, SIZE_MAX); // headers alone still overflow
+    CHECK(!bus);
+}
+
 int main() {
     test_empty_bus();
     test_subscribe_rules();
@@ -678,6 +845,12 @@ int main() {
     test_drain_snapshot();
     test_post_queue_full();
     test_post_ring_wraps();
+    test_subscribers_resolved_at_drain();
+    test_post_without_payload();
+    test_create_ex_sizes();
+    test_create_ex_no_payload();
+    test_create_ex_odd_slot_size();
+    test_create_ex_rejects_overflow();
     test_slot_held_during_dispatch();
     test_publish_from_drain();
     test_drop_posted();

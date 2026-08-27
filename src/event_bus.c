@@ -81,17 +81,25 @@ typedef struct {
 typedef struct {
     eb_EventType type;
     size_t data_size;
-    // over-aligned so a payload of any type lands aligned, as EB_EV_EXPECT asserts
-    alignas(max_align_t) unsigned char data[EB_MAX_POST_PAYLOAD];
-} PostSlot;
+} PostHeader;
 
 // Ring of fixed-size slots: a post copies its payload in, a drain dispatches
-// straight out of it. Fixed size, so unlike SubscriptionVec it never moves and
-// a slot pointer stays valid across a call into user code.
+// straight out of it. Headers and payloads sit in separate arrays because the
+// payload size is chosen at run time, so a slot cannot be one struct. The
+// payload base comes from malloc and the stride is a multiple of max_align_t,
+// which is what lands every slot aligned for whatever type was posted -- the
+// alignment EB_EV_EXPECT asserts on.
+//
+// Neither array is resized, so unlike SubscriptionVec they never move and a
+// slot stays put across a call into user code.
 typedef struct {
-    PostSlot *slots;
+    PostHeader *headers;
+    unsigned char *payloads; // nullptr while slot_size is 0
     size_t head;
     size_t count;
+    size_t cap;
+    size_t slot_size; // largest payload a caller may post
+    size_t stride;    // slot_size rounded up to max_align_t
 } PostQueue;
 
 struct eb_EventBus {
@@ -104,7 +112,28 @@ struct eb_EventBus {
 };
 
 eb_EventBus *eb_bus_create(size_t event_type_count) {
+    return eb_bus_create_ex(event_type_count, EB_DEFAULT_POST_PAYLOAD, EB_DEFAULT_POST_QUEUE_CAP);
+}
+
+eb_EventBus *eb_bus_create_ex(size_t event_type_count, size_t post_slot_size, size_t post_queue_cap) {
     assert(event_type_count > 0);
+    assert(post_queue_cap > 0); // a feature is not switched off by sizing it to zero
+
+    constexpr size_t align = alignof(max_align_t);
+
+    // the queue arithmetic is settled once, here, so that every later post can
+    // index the ring without rechecking anything
+    if (post_slot_size > SIZE_MAX - (align - 1)) {
+        return nullptr;
+    }
+    const size_t stride = (post_slot_size + align - 1) / align * align;
+
+    if (post_queue_cap > SIZE_MAX / sizeof(PostHeader)) {
+        return nullptr;
+    }
+    if (stride > 0 && post_queue_cap > SIZE_MAX / stride) {
+        return nullptr;
+    }
 
     eb_EventBus *bus = malloc(sizeof(eb_EventBus));
     if (!bus) {
@@ -117,8 +146,8 @@ eb_EventBus *eb_bus_create(size_t event_type_count) {
     bus->total_dead = 0;
     bus->dispatch_depth = 0;
 
-    // the queue is allocated on the first post, not here
-    bus->queue = (PostQueue){};
+    // the queue buffers are allocated on the first post, not here
+    bus->queue = (PostQueue){.cap = post_queue_cap, .slot_size = post_slot_size, .stride = stride};
     bus->draining = false;
 
     if (!bus->subs) {
@@ -136,14 +165,14 @@ void eb_bus_destroy(eb_EventBus *bus) {
         free(bus->subs[t].data);
     }
     free(bus->subs);
-    free(bus->queue.slots);
+    free(bus->queue.headers);
+    free(bus->queue.payloads);
     free(bus);
 }
 
 void eb_bus_reset(eb_EventBus *bus) {
     assert(bus);
-    assert(bus->dispatch_depth == 0);
-    assert(!bus->draining);
+    assert(bus->dispatch_depth == 0); // implies no drain is in flight either
 
     for (size_t t = 0; t < bus->event_type_count; ++t) {
         SubscriptionVec *v = &bus->subs[t];
@@ -407,27 +436,27 @@ bool eb_post_data(eb_EventBus *bus, eb_EventType type, const void *data, size_t 
         return false;
     }
 
-    if (data_size > EB_MAX_POST_PAYLOAD) {
-        assert(0 && "eb_post_data: payload above EB_MAX_POST_PAYLOAD");
-        return false;
-    }
-
     PostQueue *q = &bus->queue;
-    if (!q->slots && !queue_alloc(bus)) {
+
+    if (data_size > q->slot_size) {
+        assert(0 && "eb_post_data: payload above this bus's post slot size");
         return false;
     }
 
-    if (q->count == EB_POST_QUEUE_CAP) {
+    if (!q->headers && !queue_alloc(bus)) {
+        return false;
+    }
+
+    if (q->count == q->cap) {
         return false;
     }
 
     // the payload is copied, not borrowed: by the time it is dispatched the
     // frame it came from is long gone
-    PostSlot *slot = &q->slots[(q->head + q->count) % EB_POST_QUEUE_CAP];
-    slot->type = type;
-    slot->data_size = data_size;
+    const size_t idx = (q->head + q->count) % q->cap;
+    q->headers[idx] = (PostHeader){.type = type, .data_size = data_size};
     if (data_size > 0) {
-        memcpy(slot->data, data, data_size);
+        memcpy(q->payloads + idx * q->stride, data, data_size);
     }
     ++q->count;
 
@@ -442,10 +471,11 @@ bool eb_post(eb_EventBus *bus, eb_EventType type) {
 
 size_t eb_drain(eb_EventBus *bus) {
     assert(bus);
-    assert(!bus->draining && "eb_drain: called from inside a drain");
-    assert(bus->dispatch_depth == 0 && "eb_drain: called from inside a dispatch");
 
-    if (bus->draining) {
+    // a handler always runs at a non-zero depth, whichever path reached it, so
+    // this rejects a drain nested in a publish and one nested in a drain alike
+    if (bus->dispatch_depth != 0) {
+        assert(0 && "eb_drain: called from inside a handler");
         return 0;
     }
 
@@ -461,15 +491,15 @@ size_t eb_drain(eb_EventBus *bus) {
 
     bus->draining = true;
     for (size_t i = 0; i < n; ++i) {
-        const PostSlot *slot = &q->slots[q->head];
-        const void *data = slot->data_size > 0 ? slot->data : nullptr;
+        const PostHeader h = q->headers[q->head];
+        const void *data = h.data_size > 0 ? q->payloads + q->head * q->stride : nullptr;
 
         // ev.data points into the slot, so the slot is released only after the
         // dispatch: freeing it first would let a post from one of these
         // handlers reuse it and overwrite the payload being read
-        (void) eb_publish_data(bus, slot->type, data, slot->data_size);
+        (void) eb_publish_data(bus, h.type, data, h.data_size);
 
-        q->head = (q->head + 1) % EB_POST_QUEUE_CAP;
+        q->head = (q->head + 1) % q->cap;
         --q->count;
     }
     bus->draining = false;
@@ -479,10 +509,11 @@ size_t eb_drain(eb_EventBus *bus) {
 
 void eb_drop_posted(eb_EventBus *bus) {
     assert(bus);
-    assert(!bus->draining && "eb_drop_posted: called from inside a drain");
 
-    // dropping mid-drain would pull the slots out from under the loop
+    // dropping mid-drain would pull the slots out from under the loop. Depth is
+    // not the test here: dropping from inside a plain publish harms nothing.
     if (bus->draining) {
+        assert(0 && "eb_drop_posted: called from inside a drain");
         return;
     }
 
@@ -563,11 +594,25 @@ static void compact_all(eb_EventBus *bus) {
 
 static bool queue_alloc(eb_EventBus *bus) {
     PostQueue *q = &bus->queue;
-    assert(!q->slots);
+    assert(!q->headers);
+    assert(q->stride % alignof(max_align_t) == 0); // what keeps every slot aligned
 
-    // not zeroed: a slot is written whole before it is ever read, and zeroing
-    // would touch every page of a buffer most buses never fill
-    q->slots = malloc(EB_POST_QUEUE_CAP * sizeof(*q->slots));
+    // neither product can overflow: both were checked in eb_bus_create_ex. Not
+    // zeroed either -- a slot is written whole before it is ever read, and
+    // zeroing would touch every page of a buffer most buses never fill
+    q->headers = malloc(q->cap * sizeof(*q->headers));
+    if (!q->headers) {
+        return false;
+    }
 
-    return q->slots != nullptr;
+    if (q->stride > 0) {
+        q->payloads = malloc(q->cap * q->stride);
+        if (!q->payloads) {
+            free(q->headers);
+            q->headers = nullptr;
+            return false;
+        }
+    }
+
+    return true;
 }

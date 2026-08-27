@@ -87,6 +87,7 @@ static void on_loot(const eb_Event *ev, eb_EventBus *bus, void *ctx) {
     printf("   looted %d gold from %s\n", loot.gold, loot.from);
 }
 
+// ownership goes to the bus: the reaper frees the enemy when it dies
 static void spawn(eb_EventBus *bus, const char *name, int hp) {
     Enemy *e = malloc(sizeof(Enemy));
     assert(e);
@@ -125,6 +126,11 @@ int main() {
     printf("teardown\n");
     printf("  drain (%zu queued)\n", eb_count_posted(bus));
     (void) eb_drain(bus);
+
+    // nobody outlived the fight, so the reaper freed every enemy. Survivors
+    // would have to be freed here instead -- this asserts we have none.
+    assert(eb_count_subscribers(bus, EV_TICK) == 0);
+    assert(eb_count_posted(bus) == 0);
 
     eb_bus_destroy(bus);
 }

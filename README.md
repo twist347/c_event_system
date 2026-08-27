@@ -16,6 +16,8 @@ optional deferred queue for work that must wait until the frame settles.
 - **Zero-copy payloads**: pass a pointer + size; no allocations in the hot path.
 - **No subscriber cap**: the per-type list grows on demand, with `eb_bus_reserve`
   to pre-allocate and `eb_bus_shrink_to_fit` to hand memory back.
+- **Queue sized per bus**: `eb_bus_create_ex` takes the post slot size and queue
+  depth, so a consumer picks them without editing the header.
 - **C++ friendly**: functions are `extern "C"`.
 - **No deps** beyond the standard library.
 
@@ -31,13 +33,15 @@ optional deferred queue for work that must wait until the frame settles.
   `EB_MAX_DISPATCH_DEPTH` levels (default 32). Hitting the cap drops
   the event and asserts in debug builds.
 - **`publish` borrows the payload, `post` copies it.** A posted payload outlives
-  the caller's frame, so it has to be copied, and it is capped at
-  `EB_MAX_POST_PAYLOAD` bytes (default 64). This is the one asymmetry between
-  the two paths.
+  the caller's frame, so it has to be copied, and it is capped at the bus's post
+  slot size (`EB_DEFAULT_POST_PAYLOAD`, 64 bytes, unless `eb_bus_create_ex` says
+  otherwise) — going over drops the event and asserts in debug builds. This is
+  the one asymmetry between the two paths.
 - **`drain` handles the events queued as of entry**, never more. A post made
   from a handler waits for the next drain, so two handlers posting to each other
-  cannot keep a drain alive. `drain` is not callable from a handler: it
-  returns 0.
+  cannot keep a drain alive. `drain` is not callable from any handler, and
+  `drop_posted` not from inside a drain; both do nothing and assert in debug
+  builds.
 
 ## Complexity & memory
 - `subscribe` / `unsubscribe` / `publish`: **O(n)** in handlers per type.
@@ -48,10 +52,15 @@ optional deferred queue for work that must wait until the frame settles.
 - Dead slots are swept only once the outermost dispatch returns, so heavy
   subscribe/unsubscribe churn *inside* a single dispatch grows a vector by the
   churn rather than by the live count. `eb_bus_shrink_to_fit` is the way back.
-- The post queue is `EB_POST_QUEUE_CAP` fixed-size slots (default 256 x 80 B
-  = 20 KB), allocated on the first `post` — a bus that never posts never pays.
-  `post` and `drain` never allocate. A full queue makes `post` return `false`;
-  during a drain one slot is held by the event in flight.
+- The post queue is a ring of fixed-size slots — `EB_DEFAULT_POST_QUEUE_CAP` of
+  them at `EB_DEFAULT_POST_PAYLOAD` bytes each, about 20 KB, unless
+  `eb_bus_create_ex` picks other sizes. It is allocated on the first `post`, so
+  a bus that never posts never pays, and `post` and `drain` never allocate. A
+  full queue makes `post` return `false`; during a drain one slot is held by the
+  event in flight.
+- Slot payloads are strided up to `max_align_t`, so a 40-byte slot really costs
+  48. `eb_bus_create_ex(n, 0, cap)` allocates no payload storage at all, which
+  is what you want for a bus that only carries signals.
 - `eb_bus_reserve(bus, type, n)` up front makes the following `n` subscribes
   allocation-free, which is what you want if the bus must not allocate after
   init. It is not a speed knob — doubling already costs ~6 reallocs to reach 100
@@ -120,6 +129,13 @@ int main(void) {
 ```
 
 Runnable versions of both live in [`examples/`](examples).
+
+Sizing the queue for the bus instead of taking the defaults:
+
+```c
+    // 4 events deep, 32-byte payloads; refuses anything larger
+    eb_EventBus *bus = eb_bus_create_ex(EV_COUNT, 32, 4);
+```
 
 > Note: public API is marked `[[nodiscard]]` — don't silently drop return values.
 > Never wrap the calls themselves in `assert()`: under `-DNDEBUG` the argument
